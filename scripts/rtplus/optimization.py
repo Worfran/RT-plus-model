@@ -1,0 +1,108 @@
+"""Optimization and first-level parallel multi-start fitting."""
+from __future__ import annotations
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+
+from .config import FitConfig, MaterialConstants
+from .objective import total_objective
+from .parameters import build_theta0_and_bounds, randomize_theta0, unpack_theta
+
+
+@dataclass(frozen=True)
+class FitResult:
+    success: bool
+    message: str
+    objective: float
+    theta_vec: np.ndarray
+    theta: dict
+    start_index: int
+
+
+def run_single_start(
+    start_index: int,
+    theta0: np.ndarray,
+    bounds,
+    loop_data: pd.DataFrame,
+    material: MaterialConstants,
+    event_series,
+    initial_states,
+    parameter_temperatures,
+    fit_config: FitConfig,
+) -> FitResult:
+    result = minimize(
+        total_objective,
+        theta0,
+        args=(loop_data, material, event_series, initial_states, parameter_temperatures),
+        method="L-BFGS-B",
+        bounds=bounds,
+        options={"maxiter": fit_config.maxiter, "ftol": fit_config.ftol, "gtol": fit_config.gtol},
+    )
+
+    theta = unpack_theta(result.x, parameter_temperatures)
+    return FitResult(
+        success=bool(result.success),
+        message=str(result.message),
+        objective=float(result.fun),
+        theta_vec=np.asarray(result.x, dtype=float),
+        theta=theta,
+        start_index=start_index,
+    )
+
+
+def make_start_vectors(temperatures, fit_config: FitConfig):
+    theta0, bounds = build_theta0_and_bounds(temperatures)
+    rng = np.random.default_rng(fit_config.random_seed)
+    starts = []
+    for i in range(fit_config.n_starts):
+        if i == 0:
+            starts.append(theta0.copy())
+        else:
+            starts.append(randomize_theta0(theta0, bounds, rng))
+    return starts, bounds
+
+
+def run_multistart(
+    loop_data: pd.DataFrame,
+    material: MaterialConstants,
+    event_series,
+    initial_states,
+    parameter_temperatures,
+    fit_config: FitConfig,
+):
+    starts, bounds = make_start_vectors(parameter_temperatures, fit_config)
+
+    if fit_config.parallel_starts and len(starts) > 1:
+        results = []
+        with ProcessPoolExecutor(max_workers=fit_config.max_workers) as ex:
+            futures = [
+                ex.submit(
+                    run_single_start,
+                    i,
+                    start,
+                    bounds,
+                    loop_data,
+                    material,
+                    event_series,
+                    initial_states,
+                    parameter_temperatures,
+                    fit_config,
+                )
+                for i, start in enumerate(starts)
+            ]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+        results.sort(key=lambda r: r.start_index)
+    else:
+        results = [
+            run_single_start(i, start, bounds, loop_data, material, event_series, initial_states, parameter_temperatures, fit_config)
+            for i, start in enumerate(starts)
+        ]
+
+    best = min(results, key=lambda r: r.objective)
+    return best, results
