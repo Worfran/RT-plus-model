@@ -14,7 +14,7 @@ def rhs(t: float, y: np.ndarray, params: dict) -> np.ndarray:
     """
 
     if not np.all(np.isfinite(y)):
-        return np.zeros(6)
+        raise FloatingPointError("Non-finite ODE state.")
 
     Ci, Cv, Nf, Np, Cf, Cp = y
     a = params["a"]
@@ -23,9 +23,9 @@ def rhs(t: float, y: np.ndarray, params: dict) -> np.ndarray:
     Ziv_vK = params.get("Ziv_vK", 0.0)
     Di = params["Di"]
     Rii = params["Rii"]
-    Zii = params["Zii"]
     Puf = params["Puf"]
     Pcs = params["Pcs"]
+    Pfcs = params["Pfcs"]
     b = params["b"]
     Omega0 = params["Omega0"]
     r0 = params["r0"]
@@ -47,27 +47,45 @@ def rhs(t: float, y: np.ndarray, params: dict) -> np.ndarray:
     jp = loop_flux(Rp, Di, Ci_eff, r0)
 
     geometry_factor = np.pi * b / Omega0
-    kiv = (Omega0 / a**2) * (Ziv_iK * Di + Ziv_vK * Dv)
-    # Lamella thickness: 100 nm = 1e-5 cm.
-    # For two absorbing planar surfaces, the surface sink strength is 12/L^2.
-    L = 1e-5
-    surface_sink_strength = 12.0 / L**2
+    enable_vacancy_extension = bool(params.get("enable_vacancy_extension", False))
+    enable_surface_sink = bool(params.get("enable_surface_sink", False))
+    kiv = 0.0
+    if enable_vacancy_extension:
+        kiv = (Omega0 / a**2) * (Ziv_iK * Di + Ziv_vK * Dv)
+
+    surface_sink_strength = 0.0
+    if enable_surface_sink:
+        # For two absorbing planar surfaces, sink strength is 12/L^2.
+        L = float(params["lamella_thickness_cm"])
+        surface_sink_strength = 12.0 / L**2
 
     df = np.zeros(6)
 
-    df[0] = G0i - Rf * Cf_eff * jf - Rp * Cp_eff * jp - 2.0 * Zii * Di * Ci_eff**2 - kiv * Ci_eff * Cv_eff - surface_sink_strength * Di * Ci_eff
+    # Preserve the published S3-S6 convention: j_i^L contains R, and the
+    # population balance uses R*C*j_i^L.  Applying the identical term with
+    # opposite signs conserves interstitial content during loop absorption.
+    faulted_absorption = Rf * Cf_eff * jf
+    perfect_absorption = Rp * Cp_eff * jp
+
+    # One di-interstitial nucleation event creates one faulted loop and moves
+    # two interstitials from Ci into the stored faulted-loop content Nf.
+    diinterstitial_nucleation = Rii * Di * Ci_eff**2
+
+    df[0] = G0i - faulted_absorption - perfect_absorption - 2.0 * diinterstitial_nucleation - kiv * Ci_eff * Cv_eff - surface_sink_strength * Di * Ci_eff
     df[1] = G0v - kiv * Ci_eff * Cv_eff - surface_sink_strength * Dv * Cv_eff
 
     # Stored interstitial content in faulted/perfect loops.
     # geometry_factor*Rf^2*Cf = Nf by definition.
-    df[2] = Rf * Cf_eff * jf - Puf * geometry_factor * Rf**2 * Cf_eff
-    df[3] = Rp * Cp_eff * jp + Puf * geometry_factor * Rf**2 * Cf_eff
+    df[2] = faulted_absorption + 2.0 * diinterstitial_nucleation - Puf * geometry_factor * Rf**2 * Cf_eff
+    df[3] = perfect_absorption + Puf * geometry_factor * Rf**2 * Cf_eff
 
     # Faulted and perfect loop number densities.
-    df[4] = Rii * Di * Ci_eff**2 - Puf * Cf_eff
+    # Faulted-loop coalescence conserves Nf while reducing Cf, allowing the
+    # second size moment Nf/Cf and therefore the representative radius to grow.
+    df[4] = diinterstitial_nucleation - Puf * Cf_eff - Pfcs * Cf_eff**2
     df[5] = Puf * Cf_eff - Pcs * Cp_eff**2
 
     if not np.all(np.isfinite(df)):
-        return np.zeros(6)
+        raise FloatingPointError("Non-finite ODE derivative.")
 
     return df

@@ -13,13 +13,14 @@ This script is designed for your current project layout:
 
 Run from the project root:
 
-    python scripts/simulation-v2.py --debug-only
-    python scripts/simulation-v2.py --n-starts 1 --no-plot
-    python scripts/simulation-v2.py --n-starts 8 --parallel-starts --max-workers 4 --no-plot
+    python scripts/simulation-v3.py --debug-only
+    python scripts/simulation-v3.py --n-starts 1 --no-plot
+    python scripts/simulation-v3.py --n-starts 8 --parallel-starts --max-workers 4 --no-plot
 """
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import sys
 
@@ -30,11 +31,12 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants
+from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, IRRADIATED_DENSITY_OBSERVATIONS, MaterialConstants
 from rtplus.data_loader import load_all_loop_data,  print_dataset_summary
-from rtplus.initial_conditions import describe_y0, make_series_initial_state
+from rtplus.initial_conditions import describe_y0, fitted_initial_states
 from rtplus.optimization import run_multistart
-from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, unpack_theta
+from rtplus.observables import predicted_mean_diameters_nm, predicted_observed_number_density
+from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, parameter_specs, unpack_theta
 from rtplus.plotting import plot_event_series_results
 from rtplus.simulation import simulate_all_series
 
@@ -51,9 +53,11 @@ def parse_args():
     p.add_argument("--n-starts", type=int, default=1, help="Number of optimizer initial guesses.")
     p.add_argument("--parallel-starts", action="store_true", help="Parallelize only optimizer starts. No temperature-level parallelism.")
     p.add_argument("--max-workers", type=int, default=None, help="Max workers for parallel starts.")
-    p.add_argument("--seed", type=int, default=10, help="Random seed for initial condition and randomized starts.")
-    p.add_argument("--ic-strategy", choices=["random", "manual", "from_nonirradiated"], default="random", help="Initial-condition strategy.")
-    p.add_argument("--t-end", type=float, default=3600.0, help="Simulation end time in seconds.")
+    p.add_argument("--seed", type=int, default=10, help="Random seed for randomized optimizer starts.")
+    p.add_argument("--ic-strategy", choices=["fit"], default="fit", help="Fit a nonredundant initial state from RT and annealing data.")
+    p.add_argument("--t-end", type=float, default=None, help="Optional duration override for every simulated event, in seconds.")
+    p.add_argument("--enable-surface-sink", action="store_true", help="Enable the optional 100 nm two-surface point-defect sink extension.")
+    p.add_argument("--enable-vacancy-extension", action="store_true", help="Fit Cv0 and Ev and enable Arrhenius vacancy recombination/loss.")
     p.add_argument("--maxiter", type=int, default=2000, help="L-BFGS-B maximum iterations per start.")
     p.add_argument("--debug-only", action="store_true", help="Run theta0 forward simulation and stop before fitting.")
     p.add_argument("--no-plot", action="store_true", help="Skip plots after fitting.")
@@ -63,7 +67,11 @@ def parse_args():
 def main():
     args = parse_args()
 
-    material = MaterialConstants()
+    material = replace(
+        MaterialConstants(),
+        enable_surface_sink=args.enable_surface_sink,
+        enable_vacancy_extension=args.enable_vacancy_extension,
+    )
     fit_config = FitConfig(
         fit_temperatures=args.temperatures,
         exclude_room_temperature=args.exclude_rt,
@@ -82,25 +90,29 @@ def main():
     )
     print_dataset_summary(loop_data)
 
-    parameter_temperatures = get_parameter_temperatures(FIT_EVENT_SERIES)
-    if args.temperatures is not None:
-        requested = {float(T) for T in args.temperatures}
-        parameter_temperatures = [T for T in parameter_temperatures if T in requested]
+    event_series = FIT_EVENT_SERIES
+    if args.t_end is not None:
+        event_series = {
+            series_id: [
+                replace(event, duration_s=float(args.t_end)) if event.simulate else event
+                for event in events
+            ]
+            for series_id, events in FIT_EVENT_SERIES.items()
+        }
+
+    parameter_temperatures = get_parameter_temperatures(event_series)
     print("\nTemperatures with fitted event parameters:", parameter_temperatures)
 
-    initial_states = {
-        series_id: make_series_initial_state(series_id, material, seed=args.seed)
-        for series_id in FIT_EVENT_SERIES
-    }
+    specs = parameter_specs(material.enable_vacancy_extension)
+    theta0, _ = build_theta0_and_bounds(parameter_temperatures, specs=specs)
+    theta_debug = unpack_theta(theta0, parameter_temperatures, specs=specs)
+    initial_states = fitted_initial_states(theta_debug, material, event_series)
     for series_id, state in initial_states.items():
         print(f"\nSeries: {series_id}\n" + describe_y0(state, material))
 
-    theta0, _ = build_theta0_and_bounds(parameter_temperatures)
-    theta_debug = unpack_theta(theta0, parameter_temperatures)
-
     try:
         debug_predictions = simulate_all_series(
-            event_series=FIT_EVENT_SERIES,
+            event_series=event_series,
             theta=theta_debug,
             material=material,
             initial_states=initial_states,
@@ -109,10 +121,14 @@ def main():
         for series_id, events in debug_predictions.items():
             print(f"\nSeries: {series_id}")
             for event_order, prediction in events.items():
+                Df_nm, Dp_nm = predicted_mean_diameters_nm(
+                    prediction,
+                    theta_debug,
+                )
                 print(
                     f"  Event {event_order}: T={prediction['temperature_C']:g} C, "
-                    f"Df={2e7 * prediction['Rf']:.6f} nm, "
-                    f"Dp={2e7 * prediction['Rp']:.6f} nm"
+                    f"Df_mean={Df_nm:.6f} nm, "
+                    f"Dp_mean={Dp_nm:.6f} nm"
                 )
     except Exception as exc:
         print("\nForward simulation failed before fitting.")
@@ -127,10 +143,10 @@ def main():
     best, all_results = run_multistart(
         loop_data,
         material,
-        FIT_EVENT_SERIES,
-        initial_states,
+        event_series,
         parameter_temperatures,
         fit_config,
+        specs,
     )
 
     print("\nAll starts:")
@@ -144,6 +160,37 @@ def main():
     print("  objective:", best.objective)
     print("  theta:", best.theta)
 
+    best_initial_states = fitted_initial_states(best.theta, material, event_series)
+    print("\nFitted initial state:")
+    print(describe_y0(best_initial_states["irradiated"], material))
+
+    best_predictions = simulate_all_series(
+        event_series=event_series,
+        theta=best.theta,
+        material=material,
+        initial_states=best_initial_states,
+    )
+    print("\nFitted event mean diameters:")
+    for event_order, prediction in best_predictions["irradiated"].items():
+        Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, best.theta)
+        print(
+            f"  event={event_order}, T={prediction['temperature_C']:g} C: "
+            f"Df_mean={Df_nm:.3f} nm, Dp_mean={Dp_nm:.3f} nm"
+        )
+    print("\nPredicted versus measured observable number densities:")
+    for event_order, prediction in best_predictions["irradiated"].items():
+        for mode in ("DF", "BF"):
+            observed = IRRADIATED_DENSITY_OBSERVATIONS.get((event_order, mode))
+            if observed is None:
+                continue
+            predicted_density = predicted_observed_number_density(mode, prediction, best.theta)
+            observed_density, observed_std = observed
+            print(
+                f"  event={event_order}, mode={mode}: "
+                f"predicted={predicted_density:.3e}, "
+                f"measured={observed_density:.3e} +/- {observed_std:.3e} cm^-3"
+            )
+
     if best.objective >= fit_config.objective_fail_value:
         print("\nWARNING: best objective is the failure value. Run with --debug-only first.")
         return
@@ -152,9 +199,9 @@ def main():
         plot_event_series_results(
             loop_data=loop_data,
             theta=best.theta,
-            event_series=FIT_EVENT_SERIES,
+            event_series=event_series,
             material=material,
-            initial_states=initial_states,
+            initial_states=best_initial_states,
         )
 
 

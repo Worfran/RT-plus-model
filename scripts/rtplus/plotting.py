@@ -4,7 +4,11 @@ from __future__ import annotations
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .observables import lognormal_shape_from_mean_std, predicted_loop_pdf
+from .observables import (
+    lognormal_shape_from_mean_std,
+    predicted_loop_pdf,
+    predicted_mean_diameters_nm,
+)
 from .simulation import simulate_all_series, simulate_all_temperatures
 
 
@@ -26,8 +30,11 @@ def plot_model_vs_data(values_nm, mode, prediction, theta, radius_unit_to_nm: fl
         print(f"No valid data for {title}")
         return
 
-    Df_nm = 2.0 * _prediction_value(prediction, "Rf") * radius_unit_to_nm
-    Dp_nm = 2.0 * _prediction_value(prediction, "Rp") * radius_unit_to_nm
+    Df_nm, Dp_nm = predicted_mean_diameters_nm(
+        prediction,
+        theta,
+        radius_unit_to_nm,
+    )
 
     x_max = max(float(values_nm.max()) * 1.2, Df_nm * 1.5, Dp_nm * 1.5, 1.0)
     x = np.linspace(1e-9, x_max, 500)
@@ -97,8 +104,11 @@ def plot_event_series_results(
 
         for row, event in enumerate(ordered_events):
             prediction = predictions[series_id][event.event_order]
-            Df_nm = 2.0 * prediction["Rf"] * radius_unit_to_nm
-            Dp_nm = 2.0 * prediction["Rp"] * radius_unit_to_nm
+            Df_nm, Dp_nm = predicted_mean_diameters_nm(
+                prediction,
+                theta,
+                radius_unit_to_nm,
+            )
 
             for col, mode in enumerate(("DF", "BF")):
                 ax = axes[row, col]

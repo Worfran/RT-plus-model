@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .parameters import build_theta0_and_bounds, unpack_theta
+from .observables import predicted_mean_diameters_nm
 from .simulation import simulate_all_temperatures
 
 
@@ -26,15 +27,16 @@ def run_prefit_debug(loop_data, temperatures, material, sim_config, fit_config, 
     theta = unpack_theta(theta0, temperatures)
     predictions = simulate_all_temperatures(temperatures, theta, material, sim_config, y0)
     print("\nForward simulation at theta0:")
-    print_prediction_diagnostics(predictions)
+    print_prediction_diagnostics(predictions, theta)
     return predictions
 
 
-def print_prediction_diagnostics(predictions):
+def print_prediction_diagnostics(predictions, theta):
     for T_C, pred in predictions.items():
+        Df_nm, Dp_nm = predicted_mean_diameters_nm(pred, theta)
         print(f"\nT = {T_C:g} °C")
-        print(f"  Rf diameter = {2*pred.Rf*1e7:.6f} nm")
-        print(f"  Rp diameter = {2*pred.Rp*1e7:.6f} nm")
+        print(f"  Faulted mean diameter = {Df_nm:.6f} nm")
+        print(f"  Perfect mean diameter = {Dp_nm:.6f} nm")
         print(f"  Cf = {pred.Cf:.3e} cm^-3")
         print(f"  Cp = {pred.Cp:.3e} cm^-3")
         print(f"  Di = {pred.Di:.3e} cm^2/s")

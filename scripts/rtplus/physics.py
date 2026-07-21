@@ -18,12 +18,25 @@ def coalescence_rate(P0: float, Ea: float, T_K: float) -> float:
 
 
 def loop_content_from_radius(R: float, C: float, b: float, Omega0: float) -> float:
-    """N = (pi*b/Omega0)*R^2*C, with b already including the Frank-loop 1/3."""
+    """N = (pi*b/Omega0)*<R^2>*C for content-equivalent radius R."""
     return float((np.pi * b / Omega0) * (R ** 2) * C)
 
 
+def lognormal_mean_radius_from_rms(R_rms: float, k: float) -> float:
+    """Convert sqrt(<R^2>) to a lognormal arithmetic mean.
+
+    Here ``k = std(R)/mean(R)``, so ``<R^2> = mean(R)^2*(1+k^2)``.
+    """
+    return float(R_rms / np.sqrt(1.0 + float(k) ** 2))
+
+
+def lognormal_rms_radius_from_mean(R_mean: float, k: float) -> float:
+    """Convert a lognormal arithmetic mean to sqrt(<R^2>)."""
+    return float(R_mean * np.sqrt(1.0 + float(k) ** 2))
+
+
 def compute_radius(N: float, C: float, b: float, Omega0: float, eps: float = 1e-300) -> float:
-    """R = sqrt(Omega0*N/(pi*b*C)), safe for ODE/debugging."""
+    """Content-equivalent radius sqrt(<R^2>), safe for ODE/debugging."""
     N_eff = max(float(N), eps)
     C_eff = max(float(C), eps)
     return float(np.sqrt(Omega0 * N_eff / (np.pi * b * C_eff)))
@@ -37,6 +50,11 @@ def logterminv(R: float, r0: float) -> float:
 
 
 def loop_flux(R: float, Di: float, Ci: float, r0: float) -> float:
-    """Interstitial flux to a toroidal loop."""
+    """Bawane et al. Eq. S6 interstitial flux to a toroidal loop.
+
+    The source ODEs S3-S5 use this quantity as ``R_L*C_L*j_i^L``.
+    ``rhs`` deliberately preserves that published convention in both the
+    mobile-interstitial sink and stored-loop-content source.
+    """
     Ci_eff = max(float(Ci), 0.0)
     return float(2.0 * np.pi**2 * R * Di * Ci_eff * logterminv(R, r0))

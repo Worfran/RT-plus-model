@@ -12,7 +12,11 @@ import numpy as np
 import pandas as pd
 
 from .config import MaterialConstants
-from .physics import compute_radius, loop_content_from_radius
+from .physics import (
+    compute_radius,
+    lognormal_rms_radius_from_mean,
+    loop_content_from_radius,
+)
 
 
 def loguniform(low: float, high: float, rng: np.random.Generator) -> float:
@@ -127,12 +131,9 @@ def describe_y0(y0: np.ndarray, material: MaterialConstants) -> str:
         f"  Np = {Np:.3e}\n"
         f"  Cf = {Cf:.3e} cm^-3\n"
         f"  Cp = {Cp:.3e} cm^-3\n"
-        f"  Rf = {Rf*1e7:.3f} nm\n"
-        f"  Rp = {Rp*1e7:.3f} nm"
+        f"  Rf_rms = {Rf*1e7:.3f} nm\n"
+        f"  Rp_rms = {Rp*1e7:.3f} nm"
     )
-
-import numpy as np
-
 
 def make_series_initial_state(
     series_id,
@@ -159,3 +160,52 @@ def make_series_initial_state(
 
     config = InitialConditionConfig(strategy="random", seed=series_seed)
     return _make_random_y0(config, material)
+
+
+def fitted_initial_state(theta: dict, material: MaterialConstants) -> np.ndarray:
+    """Construct a nonredundant fitted state in physical units.
+
+    Ci0, Cv0, Cf0 and Cp0 are number concentrations in cm^-3.  The two
+    stored-interstitial concentrations are derived from fitted arithmetic-mean
+    radii, fitted distribution widths, and loop number densities.  This makes
+    N proportional to the physical second moment C*<R^2>.
+    """
+
+    required = ("Ci0", "Cf0", "Cp0", "Rf0_nm", "Rp0_nm")
+    missing = [name for name in required if name not in theta]
+    if missing:
+        raise KeyError(f"Missing fitted initial-condition parameters: {missing}")
+
+    Ci0 = float(theta["Ci0"])
+    Cv0 = float(theta.get("Cv0", 0.0))
+    Cf0 = float(theta["Cf0"])
+    Cp0 = float(theta["Cp0"])
+    Rf0 = float(theta["Rf0_nm"]) * 1e-7
+    Rp0 = float(theta["Rp0_nm"]) * 1e-7
+
+    if min(Ci0, Cv0, Cf0, Cp0, Rf0, Rp0) < 0.0:
+        raise ValueError("Fitted initial conditions must be nonnegative.")
+
+    Nf0 = loop_content_from_radius(
+        lognormal_rms_radius_from_mean(Rf0, theta["k_f"]),
+        Cf0,
+        material.b,
+        material.Omega0,
+    )
+    Np0 = loop_content_from_radius(
+        lognormal_rms_radius_from_mean(Rp0, theta["k_p"]),
+        Cp0,
+        material.b,
+        material.Omega0,
+    )
+    return np.array([Ci0, Cv0, Nf0, Np0, Cf0, Cp0], dtype=float)
+
+
+def fitted_initial_states(theta: dict, material: MaterialConstants, series_ids) -> dict:
+    """Build fitted initial states for the currently fitted specimen series."""
+
+    # The active workflow fits only the irradiated series.  Keeping the map
+    # construction here makes the later addition of per-series IC parameters
+    # explicit instead of silently sharing mutable state.
+    state = fitted_initial_state(theta, material)
+    return {series_id: state.copy() for series_id in series_ids}

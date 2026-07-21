@@ -4,8 +4,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .config import FitConfig, MaterialConstants, SimulationConfig
-from .observables import predicted_loop_logpdf
+from .config import (
+    FitConfig,
+    IRRADIATED_DENSITY_OBSERVATIONS,
+    MaterialConstants,
+    ObservationConfig,
+    SimulationConfig,
+)
+from .initial_conditions import fitted_initial_states
+from .observables import predicted_loop_logpdf, predicted_observed_number_density
 from .parameters import unpack_theta
 from .simulation import simulate_all_temperatures
 from .simulation import simulate_all_series
@@ -19,8 +26,9 @@ def total_objective(
     loop_data,
     material,
     event_series,
-    initial_states,
     parameter_temperatures,
+    fit_config,
+    parameter_specs,
     radius_unit_to_nm=1e7,
 ):
     """
@@ -33,7 +41,10 @@ def total_objective(
     theta = unpack_theta(
         theta_vector,
         parameter_temperatures,
+        specs=parameter_specs,
     )
+
+    initial_states = fitted_initial_states(theta, material, event_series)
 
     try:
         predictions = simulate_all_series(
@@ -49,7 +60,12 @@ def total_objective(
     number_of_contributions = 0
 
     fitted_series = set(event_series)
-    data_to_fit = loop_data[loop_data["series_id"].isin(fitted_series)]
+    data_to_fit = loop_data[loop_data["series_id"].isin(fitted_series)].copy()
+    if fit_config.exclude_room_temperature:
+        data_to_fit = data_to_fit[data_to_fit["temperature_C"] != 25.0]
+    if fit_config.fit_temperatures is not None:
+        selected = {float(T) for T in fit_config.fit_temperatures}
+        data_to_fit = data_to_fit[data_to_fit["temperature_C"].isin(selected)]
 
     grouped_data = data_to_fit.groupby(
         ["series_id", "event_order", "mode"],
@@ -78,6 +94,7 @@ def total_objective(
             prediction=prediction,
             fit_theta=theta,
             radius_unit_to_nm=radius_unit_to_nm,
+            observation_config=ObservationConfig(),
         )
 
         if len(logpdf) == 0:
@@ -93,6 +110,32 @@ def total_objective(
 
         total_loss += dataset_loss
         number_of_contributions += 1
+
+        if series_id == "irradiated":
+            density_observation = IRRADIATED_DENSITY_OBSERVATIONS.get(
+                (int(event_order), str(mode).upper())
+            )
+            if density_observation is not None:
+                observed_density, observed_std = density_observation
+                predicted_density = predicted_observed_number_density(
+                    mode=mode,
+                    prediction=prediction,
+                    theta=theta,
+                    observation_config=ObservationConfig(),
+                    radius_unit_to_nm=radius_unit_to_nm,
+                )
+                if predicted_density <= 0.0 or not np.isfinite(predicted_density):
+                    return PENALTY
+
+                relative_std = observed_std / observed_density
+                relative_std = max(
+                    relative_std,
+                    fit_config.density_relative_uncertainty_floor,
+                )
+                sigma_log = np.sqrt(np.log1p(relative_std**2))
+                log_residual = np.log(predicted_density / observed_density)
+                density_loss = 0.5 * (log_residual / sigma_log) ** 2
+                total_loss += fit_config.density_loss_weight * density_loss
 
     if number_of_contributions == 0:
         return PENALTY

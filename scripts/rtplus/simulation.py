@@ -21,6 +21,7 @@ class Prediction:
     Cp: float
     Di: float
     Pcs: float
+    Pfcs: float
     Puf: float
 
 
@@ -45,7 +46,6 @@ def simulate_temperature(
         "r0": material.r0,
         "Rii": material.Rii,
 
-        "Zii": material.Zii,
         "Ziv_iK": material.Ziv_iK,
         "Ziv_vK": material.Ziv_vK,
 
@@ -53,9 +53,14 @@ def simulate_temperature(
         "G0v": material.G0v,
 
         "Di": diffusion_coeff(material.D0, theta["Em"], T_K),
-        "Dv": 0.0,
+        "Dv": diffusion_coeff(material.Dv0, theta.get("Ev", material.Ev), T_K)
+        if material.enable_vacancy_extension else 0.0,
+        "enable_vacancy_extension": material.enable_vacancy_extension,
+        "enable_surface_sink": material.enable_surface_sink,
+        "lamella_thickness_cm": material.lamella_thickness_cm,
 
         "Pcs": coalescence_rate(theta["P0"], theta["Ea"], T_K),
+        "Pfcs": coalescence_rate(theta["P0_f"], theta["Ea_f"], T_K),
         "Puf": Puf_by_T[T_C],
     }
 
@@ -94,6 +99,7 @@ def simulate_temperature(
         Cp=float(Cp),
         Di=params["Di"],
         Pcs=params["Pcs"],
+        Pfcs=params["Pfcs"],
         Puf=params["Puf"],
     )
 
@@ -197,7 +203,6 @@ def simulate_event(
         "r0": material.r0,
         "Rii": material.Rii,
 
-        "Zii": material.Zii,
         "Ziv_iK": material.Ziv_iK,
         "Ziv_vK": material.Ziv_vK,
 
@@ -210,13 +215,22 @@ def simulate_event(
             T_K,
         ),
 
-        "Dv": 0.0,
+        "Dv": diffusion_coeff(material.Dv0, theta.get("Ev", material.Ev), T_K)
+        if material.enable_vacancy_extension else 0.0,
+        "enable_vacancy_extension": material.enable_vacancy_extension,
+        "enable_surface_sink": material.enable_surface_sink,
+        "lamella_thickness_cm": material.lamella_thickness_cm,
 
         "Puf": Puf,
 
         "Pcs": coalescence_rate(
             theta["P0"],
             theta["Ea"],
+            T_K,
+        ),
+        "Pfcs": coalescence_rate(
+            theta["P0_f"],
+            theta["Ea_f"],
             T_K,
         ),
     }
@@ -237,13 +251,21 @@ def simulate_event(
             f"{solution.message}"
         )
 
-    y_final = solution.y[:, -1]
+    y_final = np.asarray(solution.y[:, -1], dtype=float)
 
     if not np.all(np.isfinite(y_final)):
         raise RuntimeError(
             f"Non-finite state for {series_id}, "
             f"event {event.event_order}"
         )
+
+    negative_tolerance = np.maximum(1e-8, 1e-10 * np.maximum(np.abs(y0), 1.0))
+    if np.any(y_final < -negative_tolerance):
+        raise RuntimeError(
+            f"Nonphysical negative state for {series_id}, event "
+            f"{event.event_order}: {y_final}"
+        )
+    y_final = np.maximum(y_final, 0.0)
 
     prediction = prediction_from_state(
         y=y_final,
@@ -258,6 +280,7 @@ def simulate_event(
             "Dv": params["Dv"],
             "Puf": params["Puf"],
             "Pcs": params["Pcs"],
+            "Pfcs": params["Pfcs"],
         },
     )
 

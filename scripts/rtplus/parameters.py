@@ -42,14 +42,48 @@ class ParameterSpec:
         raise ValueError(f"Unknown transform: {self.transform}")
 
 
-DEFAULT_PARAMETER_SPECS = (
+KINETIC_PARAMETER_SPECS = (
     ParameterSpec("Em", scope="global", transform="identity", initial=2.8, bounds=(0.1, 6.0)),
     ParameterSpec("Ea", scope="global", transform="identity", initial=1.9, bounds=(0.1, 6.0)),
     ParameterSpec("P0", scope="global", transform="log", initial=1e-12, bounds=(1e-30, 1e-6)),
+    # Effective coalescence/ripening of the faulted-loop population.  This is
+    # separate from perfect-loop coalescence because the two loop types have
+    # different mobility and structure.
+    ParameterSpec("Ea_f", scope="global", transform="identity", initial=1.9, bounds=(0.1, 6.0)),
+    ParameterSpec("P0_f", scope="global", transform="log", initial=1e-12, bounds=(1e-30, 1e-6)),
     ParameterSpec("Puf", scope="per_temperature", transform="log", initial=1e-5, bounds=(1e-10, 1e-2)),
     ParameterSpec("k_f", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
     ParameterSpec("k_p", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
 )
+
+
+INITIAL_CONDITION_PARAMETER_SPECS = (
+    # All concentrations use cm^-3.  Nf0 and Np0 are deliberately omitted:
+    # they are derived from C and R so the initial state is not redundant.
+    ParameterSpec("Ci0", scope="global", transform="log", initial=1.4e17, bounds=(1e10, 1e20)),
+    ParameterSpec("Cf0", scope="global", transform="log", initial=8.0e16, bounds=(1e12, 1e20)),
+    ParameterSpec("Cp0", scope="global", transform="log", initial=5.0e16, bounds=(1e12, 1e20)),
+    ParameterSpec("Rf0_nm", scope="global", transform="log", initial=0.62, bounds=(0.1, 20.0)),
+    ParameterSpec("Rp0_nm", scope="global", transform="log", initial=2.5, bounds=(0.1, 100.0)),
+)
+
+
+VACANCY_EXTENSION_PARAMETER_SPECS = (
+    # This optional extension is intentionally separate from the source loop
+    # model. Cv0 is otherwise fixed to zero and Ev is unused.
+    ParameterSpec("Cv0", scope="global", transform="log", initial=1e16, bounds=(1e8, 1e21)),
+    ParameterSpec("Ev", scope="global", transform="identity", initial=0.59, bounds=(0.1, 6.0)),
+)
+
+
+DEFAULT_PARAMETER_SPECS = KINETIC_PARAMETER_SPECS + INITIAL_CONDITION_PARAMETER_SPECS
+
+
+def parameter_specs(enable_vacancy_extension: bool = False):
+    specs = DEFAULT_PARAMETER_SPECS
+    if enable_vacancy_extension:
+        specs += VACANCY_EXTENSION_PARAMETER_SPECS
+    return specs
 
 
 def get_parameter_temperatures(event_series) -> list[float]:

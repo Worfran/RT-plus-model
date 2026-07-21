@@ -31,20 +31,20 @@ def run_single_start(
     loop_data: pd.DataFrame,
     material: MaterialConstants,
     event_series,
-    initial_states,
     parameter_temperatures,
     fit_config: FitConfig,
+    parameter_specs,
 ) -> FitResult:
     result = minimize(
         total_objective,
         theta0,
-        args=(loop_data, material, event_series, initial_states, parameter_temperatures),
+        args=(loop_data, material, event_series, parameter_temperatures, fit_config, parameter_specs),
         method="L-BFGS-B",
         bounds=bounds,
         options={"maxiter": fit_config.maxiter, "ftol": fit_config.ftol, "gtol": fit_config.gtol},
     )
 
-    theta = unpack_theta(result.x, parameter_temperatures)
+    theta = unpack_theta(result.x, parameter_temperatures, specs=parameter_specs)
     return FitResult(
         success=bool(result.success),
         message=str(result.message),
@@ -55,8 +55,8 @@ def run_single_start(
     )
 
 
-def make_start_vectors(temperatures, fit_config: FitConfig):
-    theta0, bounds = build_theta0_and_bounds(temperatures)
+def make_start_vectors(temperatures, fit_config: FitConfig, parameter_specs):
+    theta0, bounds = build_theta0_and_bounds(temperatures, specs=parameter_specs)
     rng = np.random.default_rng(fit_config.random_seed)
     starts = []
     for i in range(fit_config.n_starts):
@@ -71,11 +71,11 @@ def run_multistart(
     loop_data: pd.DataFrame,
     material: MaterialConstants,
     event_series,
-    initial_states,
     parameter_temperatures,
     fit_config: FitConfig,
+    parameter_specs,
 ):
-    starts, bounds = make_start_vectors(parameter_temperatures, fit_config)
+    starts, bounds = make_start_vectors(parameter_temperatures, fit_config, parameter_specs)
 
     if fit_config.parallel_starts and len(starts) > 1:
         results = []
@@ -89,9 +89,9 @@ def run_multistart(
                     loop_data,
                     material,
                     event_series,
-                    initial_states,
                     parameter_temperatures,
                     fit_config,
+                    parameter_specs,
                 )
                 for i, start in enumerate(starts)
             ]
@@ -100,9 +100,10 @@ def run_multistart(
         results.sort(key=lambda r: r.start_index)
     else:
         results = [
-            run_single_start(i, start, bounds, loop_data, material, event_series, initial_states, parameter_temperatures, fit_config)
+            run_single_start(i, start, bounds, loop_data, material, event_series, parameter_temperatures, fit_config, parameter_specs)
             for i, start in enumerate(starts)
         ]
 
-    best = min(results, key=lambda r: r.objective)
+    successful = [result for result in results if result.success]
+    best = min(successful or results, key=lambda r: r.objective)
     return best, results

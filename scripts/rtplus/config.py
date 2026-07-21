@@ -36,14 +36,22 @@ class MaterialConstants:
     Omega0: float = field(default_factory=lambda: (5.41e-8 ** 3) / 4.0)
     r0: float = field(default_factory=lambda: 2.0 * 5.41e-8)
     Rii: float = field(default_factory=lambda: (np.sqrt(3.0) / 2.0) * 5.41e-8)
-    Zii: float = 12.0
     # Interstitial-vacancy recombination bias/capture factors
     Ziv_iK: float = 48.0
     Ziv_vK: float = 48.0
 
-    # Vacancy diffusion prefactor, cm^2/s
-    # Keep zero if vacancy diffusion is inactive for now.
-    Dv0: float = 0.0
+    # Ceria oxygen-vacancy diffusion prefactor, cm^2/s.  The value is the
+    # 120e6 um^2/s prefactor cited in Table 4 of Bawane et al.  Vacancy
+    # coupling is disabled by default because it is an extension of the
+    # paper's five-variable loop model, not part of equations S1-S5.
+    Dv0: float = 1.2
+    Ev: float = 0.59
+    enable_vacancy_extension: bool = False
+
+    # The paper's loop model does not include a free-surface sink.  Retain it
+    # as an explicit optional extension for a 100 nm TEM lamella.
+    enable_surface_sink: bool = False
+    lamella_thickness_cm: float = 1.0e-5
 
     # Paper value 1e6 um^2/s converted to cm^2/s: 1 um^2 = 1e-8 cm^2.
     D0: float = 1.0e-2
@@ -80,6 +88,38 @@ class FitConfig:
     ftol: float = 1e-9
     gtol: float = 1e-6
     objective_fail_value: float = 1e100
+    density_loss_weight: float = 1.0
+    density_relative_uncertainty_floor: float = 0.20
+
+
+@dataclass(frozen=True)
+class ObservationConfig:
+    """TEM visibility and resolution model from Bawane et al., Eqs. 2-6.
+
+    Resolution limits are radii because the source equations integrate a
+    radius distribution.  The fitted raw-size distributions remain
+    lognormal; these limits are used to predict observable number density.
+    """
+
+    relrod_faulted_visibility: float = 0.25
+    bf_faulted_visibility: float = 1.0
+    bf_perfect_visibility: float = 0.5
+    relrod_resolution_radius_nm: float = 0.5
+    bf_resolution_radius_nm: float = 1.0
+
+
+# Experimental number-density summaries from
+# Data/CeO2_Insitu_Heating_Data_Analysis.xlsx, rescaled from the workbook's
+# 80 nm thickness to the selected 100 nm lamella thickness. Units are cm^-3.
+# Values are (mean, standard deviation across images).
+IRRADIATED_DENSITY_OBSERVATIONS = {
+    (0, "BF"): (9.536018277547304e16, 6.601793593272652e15),
+    (0, "DF"): (2.804856567767407e16, 1.4921296462557423e16),
+    (1, "BF"): (5.901821642730334e16, 1.2020457096214666e16),
+    (1, "DF"): (5.060694373567550e16, 9.657881977316821e15),
+    (2, "BF"): (3.1710333617027764e16, 2.306724009993600e16),
+    (2, "DF"): (3.825191252332437e16, 2.466652692961411e16),
+}
 
 @dataclass(frozen=True)
 class DatasetSpec:
