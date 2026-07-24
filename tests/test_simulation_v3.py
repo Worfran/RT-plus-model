@@ -5,6 +5,7 @@ import sys
 import unittest
 
 import numpy as np
+import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,11 +14,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants, ObservationConfig
 from rtplus.data_loader import load_all_loop_data
 from rtplus.initial_conditions import fitted_initial_state, fitted_initial_states
-from rtplus.objective import total_objective
+from rtplus.objective import image_count_deviance, total_objective
 from rtplus.observables import (
     binned_loop_number_density,
     binned_loop_number_density_from_images,
     image_number_density_statistics,
+    predicted_loop_logpdf,
     predicted_loop_number_density_distribution,
     predicted_mean_radii_nm,
     predicted_observed_number_density,
@@ -161,6 +163,70 @@ class SimulationV3Tests(unittest.TestCase):
             1.0,
             places=6,
         )
+
+    def test_resolution_cutoff_is_consistent_for_density_and_size_pdf(self):
+        prediction = {"Rf": 1.0e-7, "Rp": 2.0e-7, "Cf": 8.0e16, "Cp": 4.0e16}
+        theta = {"k_f": 0.5, "k_p": 0.5}
+        cfg = ObservationConfig(
+            bf_resolution_radius_nm=1.0,
+            apply_resolution_cutoff=True,
+        )
+        x_nm = np.geomspace(1.0e-4, 1.0e3, 30000)
+        spectrum = predicted_loop_number_density_distribution(
+            x_nm,
+            "BF",
+            prediction,
+            theta,
+            observation_config=cfg,
+        )
+        expected_density = predicted_observed_number_density(
+            "BF",
+            prediction,
+            theta,
+            cfg,
+        )
+        np.testing.assert_allclose(
+            float(np.trapezoid(spectrum, x_nm)) / expected_density,
+            1.0,
+            rtol=2.0e-4,
+        )
+        self.assertTrue(np.all(spectrum[x_nm < 2.0] == 0.0))
+
+        conditional_pdf = np.exp(
+            predicted_loop_logpdf(
+                x_nm,
+                "BF",
+                prediction,
+                theta,
+                observation_config=cfg,
+            )
+        )
+        np.testing.assert_allclose(
+            float(np.trapezoid(conditional_pdf, x_nm)),
+            1.0,
+            rtol=2.0e-4,
+        )
+
+    def test_negative_binomial_count_deviance_uses_image_volumes(self):
+        group = pd.DataFrame(
+            {
+                "image": ["A"] * 10 + ["B"] * 20,
+                "volume_cm3": [1.0e-15] * 10 + [2.0e-15] * 20,
+            }
+        )
+        matched_loss, alpha = image_count_deviance(
+            group,
+            predicted_density=1.0e16,
+            overdispersion_floor=0.04,
+        )
+        mismatched_loss, _ = image_count_deviance(
+            group,
+            predicted_density=2.0e16,
+            overdispersion_floor=0.04,
+        )
+        self.assertAlmostEqual(matched_loss, 0.0, places=12)
+        self.assertAlmostEqual(alpha, 0.04)
+        self.assertGreater(mismatched_loss, matched_loss)
 
     def test_events_are_sequential(self):
         states = fitted_initial_states(self.theta, self.material, self.event_series)

@@ -90,6 +90,11 @@ class FitConfig:
     objective_fail_value: float = 1e100
     density_loss_weight: float = 1.0
     density_relative_uncertainty_floor: float = 0.20
+    # Default objective: equal weight per TEM image for loop diameters plus
+    # an overdispersed count term using that image's sampled volume.
+    objective_mode: str = "image_balanced_extended"
+    # NB2 alpha floor.  alpha=0.04 gives a 20% asymptotic count CV.
+    count_overdispersion_floor: float = 0.04
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,11 @@ class ObservationConfig:
     bf_perfect_visibility: float = 0.5
     relrod_resolution_radius_nm: float = 0.5
     bf_resolution_radius_nm: float = 1.0
+    # The current raw files contain many measured diameters below twice the
+    # published radius limits, so applying those limits would assign zero
+    # probability to recorded observations.  Keep the correction available
+    # for a genuinely thresholded dataset.
+    apply_resolution_cutoff: bool = False
 
 
 @dataclass(frozen=True)

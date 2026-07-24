@@ -33,6 +33,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants
 from rtplus.data_loader import load_all_loop_data,  print_dataset_summary
+from rtplus.diagnostics import print_bf_df_density_consistency
 from rtplus.initial_conditions import describe_y0, fitted_initial_states
 from rtplus.optimization import run_multistart
 from rtplus.observables import (
@@ -64,6 +65,21 @@ def parse_args():
     p.add_argument("--enable-surface-sink", action="store_true", help="Enable the optional 100 nm two-surface point-defect sink extension.")
     p.add_argument("--enable-vacancy-extension", action="store_true", help="Fit Cv0 and Ev and enable Arrhenius vacancy recombination/loss.")
     p.add_argument("--maxiter", type=int, default=2000, help="L-BFGS-B maximum iterations per start.")
+    p.add_argument(
+        "--objective-mode",
+        choices=["image_balanced_extended", "legacy"],
+        default="image_balanced_extended",
+        help=(
+            "Fit per-image sizes and overdispersed image counts together "
+            "(default), or use the previous pooled-size objective."
+        ),
+    )
+    p.add_argument(
+        "--count-overdispersion-floor",
+        type=float,
+        default=0.04,
+        help="Minimum NB2 count overdispersion; 0.04 corresponds to 20%% image-level CV.",
+    )
     p.add_argument("--debug-only", action="store_true", help="Run theta0 forward simulation and stop before fitting.")
     p.add_argument("--no-plot", action="store_true", help="Skip plots after fitting.")
     p.add_argument("--plot-dir", type=Path, default=PROJECT_ROOT / "Results", help="Directory for meeting-ready PNG plots.")
@@ -72,6 +88,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.count_overdispersion_floor <= 0.0:
+        raise ValueError("--count-overdispersion-floor must be positive.")
 
     material = replace(
         MaterialConstants(),
@@ -86,15 +104,18 @@ def main():
         max_workers=args.max_workers,
         random_seed=args.seed,
         maxiter=args.maxiter,
+        objective_mode=args.objective_mode,
+        count_overdispersion_floor=args.count_overdispersion_floor,
     )
     data_config = DataConfig(data_dir=args.data_dir)
 
-    
     loop_data = load_all_loop_data(
         config=data_config,
         project_root=PROJECT_ROOT,
     )
     print_dataset_summary(loop_data)
+    print_bf_df_density_consistency(loop_data)
+    print(f"\nObjective mode: {fit_config.objective_mode}")
 
     event_series = FIT_EVENT_SERIES
     if args.t_end is not None:

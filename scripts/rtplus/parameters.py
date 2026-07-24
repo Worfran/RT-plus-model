@@ -52,7 +52,11 @@ KINETIC_PARAMETER_SPECS = (
     ParameterSpec("Ea_f", scope="global", transform="identity", initial=1.9, bounds=(0.1, 6.0)),
     ParameterSpec("P0_f", scope="global", transform="log", initial=1e-12, bounds=(1e-30, 1e-6)),
     ParameterSpec("Puf", scope="per_temperature", transform="log", initial=1e-5, bounds=(1e-10, 1e-2)),
-    ParameterSpec("k_f", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
+    # Rel-rod data directly identify the faulted-loop width.  Keeping k_f in
+    # the range supported by those pure-faulted datasets prevents the BF
+    # mixture from replacing a perfect-loop population with an unrealistically
+    # broad faulted tail.
+    ParameterSpec("k_f", scope="global", transform="log", initial=0.5, bounds=(0.10, 0.80)),
     ParameterSpec("k_p", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
 )
 
@@ -62,9 +66,11 @@ INITIAL_CONDITION_PARAMETER_SPECS = (
     # they are derived from C and R so the initial state is not redundant.
     ParameterSpec("Ci0", scope="global", transform="log", initial=1.4e17, bounds=(1e10, 1e20)),
     ParameterSpec("Cf0", scope="global", transform="log", initial=8.0e16, bounds=(1e12, 1e20)),
-    ParameterSpec("Cp0", scope="global", transform="log", initial=5.0e16, bounds=(1e12, 1e20)),
+    # A vanishing Cp combined with an enormous Rp is a singular finite-mixture
+    # solution, not a physically resolved perfect-loop population.
+    ParameterSpec("Cp0", scope="global", transform="log", initial=5.0e16, bounds=(1e15, 1e20)),
     ParameterSpec("Rf0_nm", scope="global", transform="log", initial=0.62, bounds=(0.1, 20.0)),
-    ParameterSpec("Rp0_nm", scope="global", transform="log", initial=2.5, bounds=(0.1, 100.0)),
+    ParameterSpec("Rp0_nm", scope="global", transform="log", initial=2.5, bounds=(0.1, 20.0)),
 )
 
 

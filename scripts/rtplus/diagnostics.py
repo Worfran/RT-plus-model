@@ -1,8 +1,9 @@
 """Diagnostic helpers for data, initial conditions, and forward simulations."""
 from __future__ import annotations
 
+from .config import ObservationConfig
 from .parameters import build_theta0_and_bounds, unpack_theta
-from .observables import predicted_mean_diameters_nm
+from .observables import image_number_density_statistics, predicted_mean_diameters_nm
 from .simulation import simulate_all_temperatures
 
 
@@ -10,6 +11,56 @@ def print_data_summary(loop_data):
     print("\nLoaded loop-size datasets:")
     print(loop_data.groupby(["temperature_C", "mode", "irradiated"]).size().rename("n_loops"))
     print("\nTotal measured loops:", len(loop_data))
+
+
+def print_bf_df_density_consistency(loop_data, series_id="irradiated"):
+    """Check whether nonnegative Cf and Cp can reproduce BF and DF counts.
+
+    With resolution cutoffs disabled, the observation equations are
+
+        C_DF = v_DF Cf
+        C_BF = v_BF,f Cf + v_BF,p Cp.
+
+    Since Cp cannot be negative, the faulted contribution inferred from DF is
+    a lower bound on BF.  Violations identify a data/visibility incompatibility
+    that no ODE parameter or optimizer can remove.
+    """
+
+    cfg = ObservationConfig()
+    if cfg.apply_resolution_cutoff:
+        return
+
+    selected = loop_data[loop_data["series_id"] == series_id]
+    print("\nBF/DF observable-density consistency check:")
+    for event_order in sorted(selected["event_order"].unique()):
+        densities = {}
+        for mode in ("DF", "BF"):
+            group = selected[
+                (selected["event_order"] == event_order)
+                & (selected["mode"].str.upper() == mode)
+            ]
+            if group.empty:
+                continue
+            densities[mode], _ = image_number_density_statistics(
+                group["image"].to_numpy(),
+                group["volume_cm3"].to_numpy(dtype=float),
+            )
+        if set(densities) != {"DF", "BF"}:
+            continue
+
+        implied_faulted_density = (
+            densities["DF"] / cfg.relrod_faulted_visibility
+        )
+        minimum_bf_density = (
+            cfg.bf_faulted_visibility * implied_faulted_density
+        )
+        ratio = minimum_bf_density / densities["BF"]
+        status = "compatible" if ratio <= 1.0 else "INCOMPATIBLE"
+        print(
+            f"  event={int(event_order)}: minimum BF from DF = "
+            f"{minimum_bf_density:.3e}, measured BF = {densities['BF']:.3e}, "
+            f"ratio={ratio:.2f} ({status})"
+        )
 
 
 def select_fit_temperatures(loop_data, fit_config) -> list[float]:

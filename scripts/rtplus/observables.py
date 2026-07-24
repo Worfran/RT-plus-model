@@ -87,25 +87,26 @@ def predicted_observed_number_density(
         Rf, Rp = prediction.Rf, prediction.Rp
         Cf, Cp = prediction.Cf, prediction.Cp
 
-    Rf_nm, Rp_nm = predicted_mean_radii_nm(
-        prediction,
-        theta,
-        radius_unit_to_nm,
-    )
+    Rf_nm, Rp_nm = predicted_mean_radii_nm(prediction, theta, radius_unit_to_nm)
 
     if mode == "DF":
-        visible_f = lognormal_survival_from_mean_and_k(
-            cfg.relrod_resolution_radius_nm, Rf_nm, theta["k_f"]
-        )
+        visible_f = 1.0
+        if cfg.apply_resolution_cutoff:
+            visible_f = lognormal_survival_from_mean_and_k(
+                cfg.relrod_resolution_radius_nm, Rf_nm, theta["k_f"]
+            )
         return float(cfg.relrod_faulted_visibility * Cf * visible_f)
 
     if mode == "BF":
-        visible_f = lognormal_survival_from_mean_and_k(
-            cfg.bf_resolution_radius_nm, Rf_nm, theta["k_f"]
-        )
-        visible_p = lognormal_survival_from_mean_and_k(
-            cfg.bf_resolution_radius_nm, Rp_nm, theta["k_p"]
-        )
+        visible_f = 1.0
+        visible_p = 1.0
+        if cfg.apply_resolution_cutoff:
+            visible_f = lognormal_survival_from_mean_and_k(
+                cfg.bf_resolution_radius_nm, Rf_nm, theta["k_f"]
+            )
+            visible_p = lognormal_survival_from_mean_and_k(
+                cfg.bf_resolution_radius_nm, Rp_nm, theta["k_p"]
+            )
         return float(
             cfg.bf_faulted_visibility * Cf * visible_f
             + cfg.bf_perfect_visibility * Cp * visible_p
@@ -114,7 +115,22 @@ def predicted_observed_number_density(
     raise ValueError(f"Unknown mode: {mode}")
 
 
-def predicted_loop_logpdf(values_nm, mode: str, prediction, theta: dict | None = None, radius_unit_to_nm: float = 1e7, fit_theta: dict | None = None, observation_config: ObservationConfig | None = None):
+def predicted_loop_log_intensity(
+    values_nm,
+    mode: str,
+    prediction,
+    theta: dict | None = None,
+    radius_unit_to_nm: float = 1e7,
+    fit_theta: dict | None = None,
+    observation_config: ObservationConfig | None = None,
+):
+    """Return log observable intensity in cm^-3 nm^-1.
+
+    Both the expected image counts and the conditional diameter distribution
+    are derived from this intensity.  This prevents visibility or resolution
+    corrections from being applied to only one part of the observation model.
+    """
+
     theta = theta if theta is not None else fit_theta
     if theta is None:
         raise ValueError("theta or fit_theta must be provided")
@@ -145,24 +161,103 @@ def predicted_loop_logpdf(values_nm, mode: str, prediction, theta: dict | None =
     logpdf_f = lognormal_logpdf_from_mean_and_k(values_nm, Df_nm, k_f)
     logpdf_p = lognormal_logpdf_from_mean_and_k(values_nm, Dp_nm, k_p)
 
+    cfg = observation_config or ObservationConfig()
+    Cf = max(float(Cf), 1e-300)
+    Cp = max(float(Cp), 1e-300)
+
     if mode == "DF":
-        return logpdf_f
+        log_intensity = (
+            np.log(max(cfg.relrod_faulted_visibility, 1e-300))
+            + np.log(Cf)
+            + logpdf_f
+        )
+        if cfg.apply_resolution_cutoff:
+            cutoff_diameter_nm = 2.0 * cfg.relrod_resolution_radius_nm
+            log_intensity = np.where(
+                values_nm >= cutoff_diameter_nm,
+                log_intensity,
+                -np.inf,
+            )
+        return log_intensity
 
     if mode == "BF":
-        cfg = observation_config or ObservationConfig()
-        Cf = max(float(Cf), 1e-300)
-        Cp = max(float(Cp), 1e-300)
-        visible_Cf = cfg.bf_faulted_visibility * Cf
-        visible_Cp = cfg.bf_perfect_visibility * Cp
-        wF = visible_Cf / (visible_Cf + visible_Cp)
-        wP = visible_Cp / (visible_Cf + visible_Cp)
-        return logsumexp(np.vstack([np.log(wF) + logpdf_f, np.log(wP) + logpdf_p]), axis=0)
+        log_intensity = logsumexp(
+            np.vstack(
+                [
+                    np.log(max(cfg.bf_faulted_visibility, 1e-300))
+                    + np.log(Cf)
+                    + logpdf_f,
+                    np.log(max(cfg.bf_perfect_visibility, 1e-300))
+                    + np.log(Cp)
+                    + logpdf_p,
+                ]
+            ),
+            axis=0,
+        )
+        if cfg.apply_resolution_cutoff:
+            cutoff_diameter_nm = 2.0 * cfg.bf_resolution_radius_nm
+            log_intensity = np.where(
+                values_nm >= cutoff_diameter_nm,
+                log_intensity,
+                -np.inf,
+            )
+        return log_intensity
 
     raise ValueError(f"Unknown mode: {mode}")
 
 
-def predicted_loop_pdf(x_nm, mode: str, prediction: Prediction, theta: dict, radius_unit_to_nm: float = 1e7):
-    return np.exp(predicted_loop_logpdf(x_nm, mode, prediction, theta, radius_unit_to_nm))
+def predicted_loop_logpdf(
+    values_nm,
+    mode: str,
+    prediction,
+    theta: dict | None = None,
+    radius_unit_to_nm: float = 1e7,
+    fit_theta: dict | None = None,
+    observation_config: ObservationConfig | None = None,
+):
+    """Return the conditional diameter log-PDF for an observed loop."""
+
+    theta = theta if theta is not None else fit_theta
+    if theta is None:
+        raise ValueError("theta or fit_theta must be provided")
+    log_intensity = predicted_loop_log_intensity(
+        values_nm=values_nm,
+        mode=mode,
+        prediction=prediction,
+        theta=theta,
+        radius_unit_to_nm=radius_unit_to_nm,
+        observation_config=observation_config,
+    )
+    total_density = predicted_observed_number_density(
+        mode=mode,
+        prediction=prediction,
+        theta=theta,
+        observation_config=observation_config,
+        radius_unit_to_nm=radius_unit_to_nm,
+    )
+    if total_density <= 0.0 or not np.isfinite(total_density):
+        return np.full_like(log_intensity, -np.inf, dtype=float)
+    return log_intensity - np.log(total_density)
+
+
+def predicted_loop_pdf(
+    x_nm,
+    mode: str,
+    prediction: Prediction,
+    theta: dict,
+    radius_unit_to_nm: float = 1e7,
+    observation_config: ObservationConfig | None = None,
+):
+    return np.exp(
+        predicted_loop_logpdf(
+            x_nm,
+            mode,
+            prediction,
+            theta,
+            radius_unit_to_nm,
+            observation_config=observation_config,
+        )
+    )
 
 
 def binned_loop_number_density(
@@ -278,17 +373,13 @@ def predicted_loop_number_density_distribution(
 ) -> np.ndarray:
     """Return the observable loop density spectrum in cm^-3 nm^-1."""
 
-    total_density = predicted_observed_number_density(
-        mode=mode,
-        prediction=prediction,
-        theta=theta,
-        observation_config=observation_config,
-        radius_unit_to_nm=radius_unit_to_nm,
-    )
-    return total_density * predicted_loop_pdf(
-        x_nm,
-        mode,
-        prediction,
-        theta,
-        radius_unit_to_nm,
+    return np.exp(
+        predicted_loop_log_intensity(
+            values_nm=x_nm,
+            mode=mode,
+            prediction=prediction,
+            theta=theta,
+            observation_config=observation_config,
+            radius_unit_to_nm=radius_unit_to_nm,
+        )
     )
