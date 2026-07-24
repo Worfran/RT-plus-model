@@ -31,13 +31,18 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, IRRADIATED_DENSITY_OBSERVATIONS, MaterialConstants
+from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants
 from rtplus.data_loader import load_all_loop_data,  print_dataset_summary
 from rtplus.initial_conditions import describe_y0, fitted_initial_states
 from rtplus.optimization import run_multistart
-from rtplus.observables import predicted_mean_diameters_nm, predicted_observed_number_density
+from rtplus.observables import (
+    image_number_density_statistics,
+    predicted_mean_diameters_nm,
+    predicted_observed_number_density,
+)
 from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, parameter_specs, unpack_theta
-from rtplus.plotting import plot_event_series_results
+from rtplus.plotting import plot_meeting_results
+from rtplus.reporting import print_final_parameter_tables
 from rtplus.simulation import simulate_all_series
 
 
@@ -61,6 +66,7 @@ def parse_args():
     p.add_argument("--maxiter", type=int, default=2000, help="L-BFGS-B maximum iterations per start.")
     p.add_argument("--debug-only", action="store_true", help="Run theta0 forward simulation and stop before fitting.")
     p.add_argument("--no-plot", action="store_true", help="Skip plots after fitting.")
+    p.add_argument("--plot-dir", type=Path, default=PROJECT_ROOT / "Results", help="Directory for meeting-ready PNG plots.")
     return p.parse_args()
 
 
@@ -170,6 +176,12 @@ def main():
         material=material,
         initial_states=best_initial_states,
     )
+    print_final_parameter_tables(
+        theta=best.theta,
+        material=material,
+        predictions=best_predictions["irradiated"],
+        objective=best.objective,
+    )
     print("\nFitted event mean diameters:")
     for event_order, prediction in best_predictions["irradiated"].items():
         Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, best.theta)
@@ -180,11 +192,18 @@ def main():
     print("\nPredicted versus measured observable number densities:")
     for event_order, prediction in best_predictions["irradiated"].items():
         for mode in ("DF", "BF"):
-            observed = IRRADIATED_DENSITY_OBSERVATIONS.get((event_order, mode))
-            if observed is None:
+            group = loop_data[
+                (loop_data["series_id"] == "irradiated")
+                & (loop_data["event_order"] == event_order)
+                & (loop_data["mode"] == mode)
+            ]
+            if group.empty:
                 continue
             predicted_density = predicted_observed_number_density(mode, prediction, best.theta)
-            observed_density, observed_std = observed
+            observed_density, observed_std = image_number_density_statistics(
+                group["image"].to_numpy(),
+                group["volume_cm3"].to_numpy(dtype=float),
+            )
             print(
                 f"  event={event_order}, mode={mode}: "
                 f"predicted={predicted_density:.3e}, "
@@ -196,12 +215,14 @@ def main():
         return
 
     if not args.no_plot:
-        plot_event_series_results(
+        plot_meeting_results(
             loop_data=loop_data,
             theta=best.theta,
             event_series=event_series,
             material=material,
             initial_states=best_initial_states,
+            predictions=best_predictions["irradiated"],
+            output_dir=args.plot_dir,
         )
 
 

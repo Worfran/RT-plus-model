@@ -14,7 +14,14 @@ from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants
 from rtplus.data_loader import load_all_loop_data
 from rtplus.initial_conditions import fitted_initial_state, fitted_initial_states
 from rtplus.objective import total_objective
-from rtplus.observables import predicted_mean_radii_nm, predicted_observed_number_density
+from rtplus.observables import (
+    binned_loop_number_density,
+    binned_loop_number_density_from_images,
+    image_number_density_statistics,
+    predicted_loop_number_density_distribution,
+    predicted_mean_radii_nm,
+    predicted_observed_number_density,
+)
 from rtplus.ode import rhs
 from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, parameter_specs, unpack_theta
 from rtplus.physics import (
@@ -25,6 +32,7 @@ from rtplus.physics import (
     loop_flux,
 )
 from rtplus.simulation import simulate_all_series
+from rtplus.reporting import print_final_parameter_tables
 
 
 class SimulationV3Tests(unittest.TestCase):
@@ -81,6 +89,78 @@ class SimulationV3Tests(unittest.TestCase):
         bf_density = predicted_observed_number_density("BF", prediction, theta, cfg)
         self.assertAlmostEqual(df_density, 0.25 * prediction["Cf"])
         self.assertAlmostEqual(bf_density, prediction["Cf"] + 0.5 * prediction["Cp"])
+
+    def test_binned_density_normalizes_by_bin_width_and_volume_density(self):
+        values_nm = np.array([0.5, 1.5, 2.5])
+        edges_nm = np.array([0.0, 1.0, 3.0])
+        total_density = 9.0e16
+
+        density = binned_loop_number_density(
+            values_nm,
+            total_density,
+            edges_nm,
+        )
+
+        np.testing.assert_allclose(density, [3.0e16, 3.0e16])
+        self.assertAlmostEqual(
+            float(np.sum(density * np.diff(edges_nm))),
+            total_density,
+        )
+
+    def test_image_resolved_density_uses_each_sampled_volume(self):
+        values_nm = np.array([0.5, 1.5, 2.5])
+        image_ids = np.array(["A", "A", "B"])
+        volumes_cm3 = np.array([1.0e-15, 1.0e-15, 2.0e-15])
+        edges_nm = np.array([0.0, 1.0, 3.0])
+
+        mean_density, density_std = image_number_density_statistics(
+            image_ids,
+            volumes_cm3,
+        )
+        spectrum = binned_loop_number_density_from_images(
+            values_nm,
+            image_ids,
+            volumes_cm3,
+            edges_nm,
+        )
+
+        np.testing.assert_allclose(mean_density, 1.25e15, rtol=1e-14)
+        np.testing.assert_allclose(density_std, 0.75e15, rtol=1e-14)
+        np.testing.assert_allclose(
+            float(np.sum(spectrum * np.diff(edges_nm))),
+            mean_density,
+            rtol=1e-14,
+        )
+
+    def test_model_density_spectrum_integrates_to_observable_density(self):
+        prediction = {"Rf": 1.0e-7, "Rp": 2.0e-7, "Cf": 8.0e16, "Cp": 4.0e16}
+        theta = {"k_f": 0.5, "k_p": 0.5}
+        cfg = ObservationConfig(
+            relrod_resolution_radius_nm=0.0,
+            bf_resolution_radius_nm=0.0,
+        )
+        x_nm = np.geomspace(1.0e-4, 1.0e3, 20000)
+
+        spectrum = predicted_loop_number_density_distribution(
+            x_nm,
+            "BF",
+            prediction,
+            theta,
+            observation_config=cfg,
+        )
+        integrated_density = float(np.trapezoid(spectrum, x_nm))
+        expected_density = predicted_observed_number_density(
+            "BF",
+            prediction,
+            theta,
+            cfg,
+        )
+
+        self.assertAlmostEqual(
+            integrated_density / expected_density,
+            1.0,
+            places=6,
+        )
 
     def test_events_are_sequential(self):
         states = fitted_initial_states(self.theta, self.material, self.event_series)
@@ -191,6 +271,26 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertEqual(len(selected), 148)
         self.assertAlmostEqual(float(selected["size"].mean()), 1.228162162162162, places=12)
 
+    def test_duplicate_image_id_is_resolved_by_source_file(self):
+        data = load_all_loop_data(DataConfig(data_dir=ROOT / "Data"), ROOT)
+        irradiated = data[
+            (data["source_file"] == "1100-DF-irr.csv")
+            & (data["image"] == "Image 1135")
+        ]
+        pristine = data[
+            (data["source_file"] == "RT-DF.csv")
+            & (data["image"] == "Image 1135")
+        ]
+
+        self.assertTrue(len(irradiated) > 0)
+        self.assertTrue(len(pristine) > 0)
+        self.assertEqual(float(irradiated["volume_nm3_reference"].iloc[0]), 2767680.0)
+        self.assertEqual(float(pristine["volume_nm3_reference"].iloc[0]), 2857680.0)
+        self.assertAlmostEqual(
+            float(irradiated["volume_cm3"].iloc[0]),
+            2767680.0 * 1.25e-21,
+        )
+
     def test_initial_objective_is_finite(self):
         data = load_all_loop_data(DataConfig(data_dir=ROOT / "Data"), ROOT)
         value = total_objective(
@@ -204,6 +304,26 @@ class SimulationV3Tests(unittest.TestCase):
         )
         self.assertTrue(np.isfinite(value))
         self.assertLess(value, 1e100)
+
+    def test_final_parameter_report_contains_distribution_widths(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        states = fitted_initial_states(self.theta, self.material, self.event_series)
+        predictions = simulate_all_series(self.event_series, self.theta, self.material, states)
+        output = StringIO()
+        with redirect_stdout(output):
+            print_final_parameter_tables(
+                self.theta,
+                self.material,
+                predictions["irradiated"],
+                objective=1.23,
+            )
+        report = output.getvalue()
+        self.assertIn("FINAL MODEL PARAMETERS", report)
+        self.assertIn("k_f", report)
+        self.assertIn("k_p", report)
+        self.assertIn("DERIVED EVENT VALUES", report)
 
 
 if __name__ == "__main__":

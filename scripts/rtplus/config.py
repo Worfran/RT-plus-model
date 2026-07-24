@@ -108,19 +108,6 @@ class ObservationConfig:
     bf_resolution_radius_nm: float = 1.0
 
 
-# Experimental number-density summaries from
-# Data/CeO2_Insitu_Heating_Data_Analysis.xlsx, rescaled from the workbook's
-# 80 nm thickness to the selected 100 nm lamella thickness. Units are cm^-3.
-# Values are (mean, standard deviation across images).
-IRRADIATED_DENSITY_OBSERVATIONS = {
-    (0, "BF"): (9.536018277547304e16, 6.601793593272652e15),
-    (0, "DF"): (2.804856567767407e16, 1.4921296462557423e16),
-    (1, "BF"): (5.901821642730334e16, 1.2020457096214666e16),
-    (1, "DF"): (5.060694373567550e16, 9.657881977316821e15),
-    (2, "BF"): (3.1710333617027764e16, 2.306724009993600e16),
-    (2, "DF"): (3.825191252332437e16, 2.466652692961411e16),
-}
-
 @dataclass(frozen=True)
 class DatasetSpec:
     """Metadata associated with one experimental CSV file."""
@@ -137,6 +124,9 @@ class DataConfig:
     """Data file names and their experimental-series metadata."""
 
     data_dir: Path = Path("Data")
+    volume_filename: str = "Volume_per_image.csv"
+    volume_reference_thickness_nm: float = 80.0
+    analysis_thickness_nm: float = 100.0
 
     dataset_specs: tuple[DatasetSpec, ...] = (
         # Irradiated series: RT -> 900 C -> 1100 C

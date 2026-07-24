@@ -163,3 +163,132 @@ def predicted_loop_logpdf(values_nm, mode: str, prediction, theta: dict | None =
 
 def predicted_loop_pdf(x_nm, mode: str, prediction: Prediction, theta: dict, radius_unit_to_nm: float = 1e7):
     return np.exp(predicted_loop_logpdf(x_nm, mode, prediction, theta, radius_unit_to_nm))
+
+
+def binned_loop_number_density(
+    values_nm,
+    total_observed_density_cm3: float,
+    bin_edges_nm,
+) -> np.ndarray:
+    """Return observed loop density per diameter for each histogram bin.
+
+    For bin ``j`` this evaluates
+
+        (n_j / n_total) * C_observed / Delta_D_j
+
+    so the bin area is the observed loop concentration in that interval and
+    the sum of all bin areas is ``C_observed`` when the edges include all
+    measured diameters.
+    """
+
+    values_nm = np.asarray(values_nm, dtype=float)
+    values_nm = values_nm[np.isfinite(values_nm) & (values_nm > 0.0)]
+    edges_nm = np.asarray(bin_edges_nm, dtype=float)
+
+    if values_nm.size == 0:
+        raise ValueError("At least one positive finite loop diameter is required.")
+    if edges_nm.ndim != 1 or edges_nm.size < 2:
+        raise ValueError("bin_edges_nm must contain at least two edges.")
+    widths_nm = np.diff(edges_nm)
+    if np.any(~np.isfinite(edges_nm)) or np.any(widths_nm <= 0.0):
+        raise ValueError("bin_edges_nm must be finite and strictly increasing.")
+    if total_observed_density_cm3 <= 0.0 or not np.isfinite(total_observed_density_cm3):
+        raise ValueError("total_observed_density_cm3 must be positive and finite.")
+
+    counts, _ = np.histogram(values_nm, bins=edges_nm)
+    return (
+        counts.astype(float)
+        / float(values_nm.size)
+        * float(total_observed_density_cm3)
+        / widths_nm
+    )
+
+
+def image_number_density_statistics(
+    image_ids,
+    volume_cm3,
+) -> tuple[float, float]:
+    """Return mean and population standard deviation across TEM images."""
+
+    image_ids = np.asarray(image_ids, dtype=str)
+    volume_cm3 = np.asarray(volume_cm3, dtype=float)
+    if image_ids.size == 0 or image_ids.size != volume_cm3.size:
+        raise ValueError("Image IDs and volumes must be nonempty and have equal length.")
+
+    densities = []
+    for image_id in np.unique(image_ids):
+        selected = image_ids == image_id
+        image_volumes = np.unique(volume_cm3[selected])
+        if (
+            image_volumes.size != 1
+            or not np.isfinite(image_volumes[0])
+            or image_volumes[0] <= 0.0
+        ):
+            raise ValueError(f"Image {image_id!r} must have one positive volume.")
+        densities.append(float(np.count_nonzero(selected)) / float(image_volumes[0]))
+
+    densities = np.asarray(densities, dtype=float)
+    return float(np.mean(densities)), float(np.std(densities, ddof=0))
+
+
+def binned_loop_number_density_from_images(
+    values_nm,
+    image_ids,
+    volume_cm3,
+    bin_edges_nm,
+) -> np.ndarray:
+    """Average per-image spectra; units are inverse volume per nm."""
+
+    values_nm = np.asarray(values_nm, dtype=float)
+    image_ids = np.asarray(image_ids, dtype=str)
+    volume_cm3 = np.asarray(volume_cm3, dtype=float)
+    edges_nm = np.asarray(bin_edges_nm, dtype=float)
+
+    if not (values_nm.size == image_ids.size == volume_cm3.size):
+        raise ValueError("Diameters, image IDs, and volumes must have equal length.")
+    widths_nm = np.diff(edges_nm)
+    if edges_nm.ndim != 1 or edges_nm.size < 2 or np.any(widths_nm <= 0.0):
+        raise ValueError("bin_edges_nm must be strictly increasing.")
+
+    spectra = []
+    for image_id in np.unique(image_ids):
+        selected = image_ids == image_id
+        image_volumes = np.unique(volume_cm3[selected])
+        if (
+            image_volumes.size != 1
+            or not np.isfinite(image_volumes[0])
+            or image_volumes[0] <= 0.0
+        ):
+            raise ValueError(f"Image {image_id!r} must have one positive volume.")
+        counts, _ = np.histogram(values_nm[selected], bins=edges_nm)
+        spectra.append(counts.astype(float) / float(image_volumes[0]) / widths_nm)
+
+    if not spectra:
+        raise ValueError("At least one image is required.")
+    return np.mean(np.vstack(spectra), axis=0)
+
+
+def predicted_loop_number_density_distribution(
+    x_nm,
+    mode: str,
+    prediction: Prediction,
+    theta: dict,
+    observation_config: ObservationConfig | None = None,
+    radius_unit_to_nm: float = 1e7,
+) -> np.ndarray:
+    """Return the observable loop density spectrum in cm^-3 nm^-1."""
+
+    total_density = predicted_observed_number_density(
+        mode=mode,
+        prediction=prediction,
+        theta=theta,
+        observation_config=observation_config,
+        radius_unit_to_nm=radius_unit_to_nm,
+    )
+    return total_density * predicted_loop_pdf(
+        x_nm,
+        mode,
+        prediction,
+        theta,
+        radius_unit_to_nm,
+    )

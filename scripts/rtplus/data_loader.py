@@ -35,6 +35,7 @@ def resolve_data_directory(
 def load_one_dataset(
     data_dir: Path,
     spec: DatasetSpec,
+    volume_metadata: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Load one wide CSV file and convert it into long format.
@@ -53,6 +54,18 @@ def load_one_dataset(
 
     if raw.empty:
         raise ValueError(f"Dataset is empty: {file_path}")
+
+    dataset_volumes = volume_metadata[
+        volume_metadata["source_file"] == spec.filename
+    ].copy()
+    expected_images = {str(column).strip() for column in raw.columns}
+    available_images = set(dataset_volumes["image"])
+    missing_images = sorted(expected_images - available_images)
+    if missing_images:
+        raise ValueError(
+            f"Volume metadata are missing for {spec.filename}: "
+            + ", ".join(missing_images)
+        )
 
     # Convert:
     #
@@ -93,6 +106,13 @@ def load_one_dataset(
     long_data["series_id"] = spec.series_id
     long_data["event_order"] = int(spec.event_order)
     long_data["source_file"] = spec.filename
+    long_data["image"] = long_data["image"].astype(str).str.strip()
+    long_data = long_data.merge(
+        dataset_volumes,
+        on=["source_file", "image"],
+        how="left",
+        validate="many_to_one",
+    )
 
     return long_data[
         [
@@ -104,8 +124,84 @@ def load_one_dataset(
             "event_order",
             "image",
             "source_file",
+            "volume_nm3_reference",
+            "volume_nm3_effective",
+            "volume_cm3",
         ]
     ]
+
+
+def load_volume_metadata(
+    data_dir: Path,
+    config: DataConfig,
+) -> pd.DataFrame:
+    """Load image volumes and convert them to the selected lamella thickness."""
+
+    path = Path(data_dir) / config.volume_filename
+    if not path.exists():
+        raise FileNotFoundError(f"Image-volume metadata not found:\n{path}")
+
+    metadata = pd.read_csv(path)
+    required = {"Source File", "Image ID", "Volume (nm3)"}
+    missing_columns = sorted(required - set(metadata.columns))
+    if missing_columns:
+        raise ValueError(
+            f"Volume metadata file {path} is missing columns: "
+            + ", ".join(missing_columns)
+        )
+
+    metadata = metadata.rename(
+        columns={
+            "Source File": "source_file",
+            "Image ID": "image",
+            "Volume (nm3)": "volume_nm3_reference",
+        }
+    )[["source_file", "image", "volume_nm3_reference"]].copy()
+    metadata["source_file"] = metadata["source_file"].astype(str).str.strip()
+    metadata["image"] = metadata["image"].astype(str).str.strip()
+    metadata["volume_nm3_reference"] = pd.to_numeric(
+        metadata["volume_nm3_reference"],
+        errors="coerce",
+    )
+
+    invalid = (
+        metadata["source_file"].eq("")
+        | metadata["image"].eq("")
+        | ~np.isfinite(metadata["volume_nm3_reference"])
+        | (metadata["volume_nm3_reference"] <= 0.0)
+    )
+    if invalid.any():
+        raise ValueError(f"Invalid row(s) in image-volume metadata: {path}")
+
+    duplicate_keys = metadata.duplicated(
+        subset=["source_file", "image"],
+        keep=False,
+    )
+    if duplicate_keys.any():
+        duplicates = metadata.loc[
+            duplicate_keys,
+            ["source_file", "image"],
+        ].drop_duplicates()
+        raise ValueError(
+            "Duplicate source-file/image keys in volume metadata:\n"
+            + duplicates.to_string(index=False)
+        )
+
+    if (
+        config.volume_reference_thickness_nm <= 0.0
+        or config.analysis_thickness_nm <= 0.0
+    ):
+        raise ValueError("Lamella thicknesses must be positive.")
+
+    thickness_scale = (
+        float(config.analysis_thickness_nm)
+        / float(config.volume_reference_thickness_nm)
+    )
+    metadata["volume_nm3_effective"] = (
+        metadata["volume_nm3_reference"] * thickness_scale
+    )
+    metadata["volume_cm3"] = metadata["volume_nm3_effective"] * 1.0e-21
+    return metadata
 
 
 def validate_dataset_specs(
@@ -168,11 +264,13 @@ def load_all_loop_data(
         config=config,
         project_root=project_root,
     )
+    volume_metadata = load_volume_metadata(data_dir, config)
 
     datasets = [
         load_one_dataset(
             data_dir=data_dir,
             spec=spec,
+            volume_metadata=volume_metadata,
         )
         for spec in config.dataset_specs
     ]

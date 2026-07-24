@@ -6,13 +6,16 @@ import pandas as pd
 
 from .config import (
     FitConfig,
-    IRRADIATED_DENSITY_OBSERVATIONS,
     MaterialConstants,
     ObservationConfig,
     SimulationConfig,
 )
 from .initial_conditions import fitted_initial_states
-from .observables import predicted_loop_logpdf, predicted_observed_number_density
+from .observables import (
+    image_number_density_statistics,
+    predicted_loop_logpdf,
+    predicted_observed_number_density,
+)
 from .parameters import unpack_theta
 from .simulation import simulate_all_temperatures
 from .simulation import simulate_all_series
@@ -112,30 +115,29 @@ def total_objective(
         number_of_contributions += 1
 
         if series_id == "irradiated":
-            density_observation = IRRADIATED_DENSITY_OBSERVATIONS.get(
-                (int(event_order), str(mode).upper())
+            observed_density, observed_std = image_number_density_statistics(
+                group["image"].to_numpy(),
+                group["volume_cm3"].to_numpy(dtype=float),
             )
-            if density_observation is not None:
-                observed_density, observed_std = density_observation
-                predicted_density = predicted_observed_number_density(
-                    mode=mode,
-                    prediction=prediction,
-                    theta=theta,
-                    observation_config=ObservationConfig(),
-                    radius_unit_to_nm=radius_unit_to_nm,
-                )
-                if predicted_density <= 0.0 or not np.isfinite(predicted_density):
-                    return PENALTY
+            predicted_density = predicted_observed_number_density(
+                mode=mode,
+                prediction=prediction,
+                theta=theta,
+                observation_config=ObservationConfig(),
+                radius_unit_to_nm=radius_unit_to_nm,
+            )
+            if predicted_density <= 0.0 or not np.isfinite(predicted_density):
+                return PENALTY
 
-                relative_std = observed_std / observed_density
-                relative_std = max(
-                    relative_std,
-                    fit_config.density_relative_uncertainty_floor,
-                )
-                sigma_log = np.sqrt(np.log1p(relative_std**2))
-                log_residual = np.log(predicted_density / observed_density)
-                density_loss = 0.5 * (log_residual / sigma_log) ** 2
-                total_loss += fit_config.density_loss_weight * density_loss
+            relative_std = observed_std / observed_density
+            relative_std = max(
+                relative_std,
+                fit_config.density_relative_uncertainty_floor,
+            )
+            sigma_log = np.sqrt(np.log1p(relative_std**2))
+            log_residual = np.log(predicted_density / observed_density)
+            density_loss = 0.5 * (log_residual / sigma_log) ** 2
+            total_loss += fit_config.density_loss_weight * density_loss
 
     if number_of_contributions == 0:
         return PENALTY
