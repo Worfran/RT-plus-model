@@ -10,6 +10,19 @@ from .physics import lognormal_mean_radius_from_rms
 from .simulation import Prediction
 
 
+def effective_bf_faulted_visibility(
+    theta: dict,
+    observation_config: ObservationConfig | None = None,
+) -> float:
+    """Return crystallographic visibility times BF detection efficiency."""
+
+    cfg = observation_config or ObservationConfig()
+    eta_bf_f = float(theta.get("eta_bf_f", 1.0))
+    if not 0.0 < eta_bf_f <= 1.0:
+        raise ValueError("eta_bf_f must be in the interval (0, 1].")
+    return float(cfg.bf_faulted_visibility * eta_bf_f)
+
+
 def lognormal_shape_from_mean_std(mean: float, std: float) -> float:
     mean = max(float(mean), 1e-30)
     std = max(float(std), 1e-30)
@@ -98,6 +111,7 @@ def predicted_observed_number_density(
         return float(cfg.relrod_faulted_visibility * Cf * visible_f)
 
     if mode == "BF":
+        visible_bf_faulted = effective_bf_faulted_visibility(theta, cfg)
         visible_f = 1.0
         visible_p = 1.0
         if cfg.apply_resolution_cutoff:
@@ -108,7 +122,7 @@ def predicted_observed_number_density(
                 cfg.bf_resolution_radius_nm, Rp_nm, theta["k_p"]
             )
         return float(
-            cfg.bf_faulted_visibility * Cf * visible_f
+            visible_bf_faulted * Cf * visible_f
             + cfg.bf_perfect_visibility * Cp * visible_p
         )
 
@@ -181,10 +195,11 @@ def predicted_loop_log_intensity(
         return log_intensity
 
     if mode == "BF":
+        visible_bf_faulted = effective_bf_faulted_visibility(theta, cfg)
         log_intensity = logsumexp(
             np.vstack(
                 [
-                    np.log(max(cfg.bf_faulted_visibility, 1e-300))
+                    np.log(max(visible_bf_faulted, 1e-300))
                     + np.log(Cf)
                     + logpdf_f,
                     np.log(max(cfg.bf_perfect_visibility, 1e-300))

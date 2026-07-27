@@ -61,6 +61,21 @@ KINETIC_PARAMETER_SPECS = (
 )
 
 
+OBSERVATION_PARAMETER_SPECS = (
+    # Effective probability that a physical faulted loop contributes to the
+    # measured BF population.  Bawane Eq. 5 supplies the crystallographic
+    # visibility factor (one); eta_bf_f additionally represents imperfect
+    # experimental detection in the present BF images.
+    ParameterSpec(
+        "eta_bf_f",
+        scope="global",
+        transform="log",
+        initial=0.20,
+        bounds=(0.01, 1.0),
+    ),
+)
+
+
 INITIAL_CONDITION_PARAMETER_SPECS = (
     # All concentrations use cm^-3.  Nf0 and Np0 are deliberately omitted:
     # they are derived from C and R so the initial state is not redundant.
@@ -82,7 +97,11 @@ VACANCY_EXTENSION_PARAMETER_SPECS = (
 )
 
 
-DEFAULT_PARAMETER_SPECS = KINETIC_PARAMETER_SPECS + INITIAL_CONDITION_PARAMETER_SPECS
+DEFAULT_PARAMETER_SPECS = (
+    KINETIC_PARAMETER_SPECS
+    + OBSERVATION_PARAMETER_SPECS
+    + INITIAL_CONDITION_PARAMETER_SPECS
+)
 
 
 def parameter_specs(enable_vacancy_extension: bool = False):

@@ -1,7 +1,8 @@
 """Console reporting for fitted RT+ parameters and derived event values."""
 from __future__ import annotations
 
-from .observables import predicted_mean_diameters_nm
+from .config import ObservationConfig
+from .observables import effective_bf_faulted_visibility, predicted_mean_diameters_nm
 
 
 def _format_value(value: float) -> str:
@@ -39,6 +40,13 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         ("Ea_f", "Faulted-loop coalescence barrier", _format_value(theta["Ea_f"]), "eV", "fitted"),
         ("k_f", "Faulted distribution std/mean", _format_value(theta["k_f"]), "-", "fitted"),
         ("k_p", "Perfect distribution std/mean", _format_value(theta["k_p"]), "-", "fitted"),
+        (
+            "eta_BF,f",
+            "BF faulted-loop detection efficiency",
+            _format_value(theta.get("eta_bf_f", 1.0)),
+            "-",
+            "fitted",
+        ),
     ]
     for temperature_C, value in sorted(theta["Puf_by_T"].items()):
         fitted_rows.append(
@@ -63,15 +71,28 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
     _print_table(("Parameter", "Value", "Units"), initial_rows)
 
     event_rows = []
+    observation_config = ObservationConfig()
+    visible_bf_faulted = effective_bf_faulted_visibility(
+        theta,
+        observation_config,
+    )
     for event_order, prediction in sorted(predictions.items()):
         metadata = prediction.get("metadata", {})
         Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, theta)
+        visible_faulted_density = visible_bf_faulted * prediction["Cf"]
+        visible_perfect_density = (
+            observation_config.bf_perfect_visibility * prediction["Cp"]
+        )
+        bf_faulted_fraction = visible_faulted_density / (
+            visible_faulted_density + visible_perfect_density
+        )
         event_rows.append(
             (
                 event_order,
                 f"{prediction['temperature_C']:g}",
                 _format_value(Df_nm),
                 _format_value(Dp_nm),
+                _format_value(bf_faulted_fraction),
                 _format_value(metadata.get("Di", 0.0)) if metadata.get("simulated") else "initial state",
                 _format_value(metadata.get("Pcs", 0.0)) if metadata.get("simulated") else "-",
                 _format_value(metadata.get("Pfcs", 0.0)) if metadata.get("simulated") else "-",
@@ -80,6 +101,16 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         )
     print("\nDERIVED EVENT VALUES")
     _print_table(
-        ("Event", "T (C)", "Df mean (nm)", "Dp mean (nm)", "Di (cm^2/s)", "Pcs (cm^3/s)", "Pfcs (cm^3/s)", "Puf (1/s)"),
+        (
+            "Event",
+            "T (C)",
+            "Df mean (nm)",
+            "Dp mean (nm)",
+            "BF faulted fraction",
+            "Di (cm^2/s)",
+            "Pcs (cm^3/s)",
+            "Pfcs (cm^3/s)",
+            "Puf (1/s)",
+        ),
         event_rows,
     )

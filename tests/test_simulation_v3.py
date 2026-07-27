@@ -92,6 +92,21 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertAlmostEqual(df_density, 0.25 * prediction["Cf"])
         self.assertAlmostEqual(bf_density, prediction["Cf"] + 0.5 * prediction["Cp"])
 
+    def test_fitted_bf_faulted_detection_efficiency_changes_only_bf(self):
+        prediction = {"Rf": 1e-7, "Rp": 2e-7, "Cf": 8e16, "Cp": 4e16}
+        theta = {"k_f": 0.5, "k_p": 0.5, "eta_bf_f": 0.2}
+        cfg = ObservationConfig(
+            relrod_resolution_radius_nm=0.0,
+            bf_resolution_radius_nm=0.0,
+        )
+        df_density = predicted_observed_number_density("DF", prediction, theta, cfg)
+        bf_density = predicted_observed_number_density("BF", prediction, theta, cfg)
+        self.assertAlmostEqual(df_density, 0.25 * prediction["Cf"])
+        self.assertAlmostEqual(
+            bf_density,
+            0.2 * prediction["Cf"] + 0.5 * prediction["Cp"],
+        )
+
     def test_binned_density_normalizes_by_bin_width_and_volume_density(self):
         values_nm = np.array([0.5, 1.5, 2.5])
         edges_nm = np.array([0.0, 1.0, 3.0])
@@ -389,6 +404,7 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertIn("FINAL MODEL PARAMETERS", report)
         self.assertIn("k_f", report)
         self.assertIn("k_p", report)
+        self.assertIn("eta_BF,f", report)
         self.assertIn("DERIVED EVENT VALUES", report)
 
 

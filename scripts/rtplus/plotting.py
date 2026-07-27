@@ -287,6 +287,137 @@ def plot_distribution_progression(
     return fig
 
 
+def plot_experimental_images_per_temperature(
+    loop_data,
+    event_series,
+    series_id="irradiated",
+    bin_width_nm: float = 1.0,
+):
+    """Create one small-multiple figure per temperature.
+
+    Every TEM image is treated as an independent dataset.  Images belonging to
+    the same observation mode and temperature use identical diameter bins and
+    common axis limits.  Each spectrum is divided by its own sampled image
+    volume and by the fixed bin width, producing units of nm^-4.
+    """
+
+    if bin_width_nm <= 0.0 or not np.isfinite(bin_width_nm):
+        raise ValueError("bin_width_nm must be positive and finite.")
+    if series_id not in event_series:
+        raise KeyError(f"Unknown event series: {series_id!r}")
+
+    selected_series = loop_data[loop_data["series_id"] == series_id]
+    figures = {}
+    colors = {"BF": "#ba0c2f", "DF": "#1f77b4"}
+
+    for event in sorted(event_series[series_id], key=lambda item: item.event_order):
+        event_data = selected_series[
+            selected_series["event_order"] == event.event_order
+        ]
+        available_modes = [
+            mode
+            for mode in ("DF", "BF")
+            if not event_data[event_data["mode"].str.upper() == mode].empty
+        ]
+        if not available_modes:
+            continue
+
+        image_ids_by_mode = {
+            mode: sorted(
+                event_data[event_data["mode"].str.upper() == mode]["image"]
+                .astype(str)
+                .unique()
+            )
+            for mode in available_modes
+        }
+        n_columns = max(len(image_ids) for image_ids in image_ids_by_mode.values())
+        figure, axes = plt.subplots(
+            len(available_modes),
+            n_columns,
+            figsize=(4.5 * n_columns, 3.8 * len(available_modes)),
+            squeeze=False,
+        )
+
+        for row, mode in enumerate(available_modes):
+            mode_data = event_data[event_data["mode"].str.upper() == mode]
+            maximum_diameter = float(mode_data["size"].max())
+            x_max = max(
+                bin_width_nm,
+                np.ceil(maximum_diameter / bin_width_nm) * bin_width_nm,
+            )
+            bin_edges = np.arange(
+                0.0,
+                x_max + 0.5 * bin_width_nm,
+                bin_width_nm,
+            )
+            row_maximum = 0.0
+
+            for column, image_id in enumerate(image_ids_by_mode[mode]):
+                axis = axes[row, column]
+                image_data = mode_data[mode_data["image"].astype(str) == image_id]
+                volume_nm3 = float(image_data["volume_nm3_effective"].iloc[0])
+                density_nm4 = binned_loop_number_density_from_images(
+                    image_data["size"].to_numpy(dtype=float),
+                    image_data["image"].to_numpy(),
+                    image_data["volume_nm3_effective"].to_numpy(dtype=float),
+                    bin_edges,
+                )
+                row_maximum = max(row_maximum, float(np.max(density_nm4)))
+
+                axis.stairs(
+                    density_nm4,
+                    bin_edges,
+                    fill=True,
+                    alpha=0.42,
+                    linewidth=1.8,
+                    color=colors[mode],
+                )
+                mean_diameter = float(image_data["size"].mean())
+                axis.axvline(
+                    mean_diameter,
+                    color=colors[mode],
+                    linestyle="--",
+                    linewidth=1.4,
+                    label=f"Mean = {mean_diameter:.2f} nm",
+                )
+                axis.set_title(f"{mode} - {image_id}")
+                axis.set_xlim(0.0, x_max)
+                axis.set_xlabel("Loop diameter (nm)")
+                axis.set_ylabel(_number_density_axis_label())
+                axis.grid(alpha=0.16)
+                axis.legend(
+                    title=(
+                        f"n = {len(image_data)}\n"
+                        f"V = {volume_nm3:.3e} nm³\n"
+                        f"ΔD = {bin_width_nm:g} nm"
+                    ),
+                    fontsize="small",
+                    title_fontsize="small",
+                    frameon=False,
+                )
+
+            for column in range(len(image_ids_by_mode[mode]), n_columns):
+                axes[row, column].set_axis_off()
+
+            if row_maximum > 0.0:
+                for column in range(len(image_ids_by_mode[mode])):
+                    axes[row, column].set_ylim(0.0, 1.08 * row_maximum)
+
+        stage = (
+            "As-irradiated"
+            if not event.simulate
+            else f"{event.temperature_C:g} °C / {event.duration_s / 3600:g} h"
+        )
+        figure.suptitle(
+            f"{series_id.capitalize()} series - {stage}: per-image loop distributions",
+            fontsize=15,
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.96))
+        figures[event.event_order] = figure
+
+    return figures
+
+
 def plot_arrhenius_diffusion(theta, material, event_series, series_id="irradiated"):
     """Plot the fitted interstitial Arrhenius law and annealing-stage values."""
     temperatures_C = sorted(
