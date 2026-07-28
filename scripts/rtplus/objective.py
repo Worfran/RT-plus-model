@@ -1,6 +1,8 @@
 """Objective function for fitting RT+ to BF/DF loop-size data."""
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import pandas as pd
 from scipy.special import gammaln, xlogy
@@ -14,8 +16,10 @@ from .config import (
 from .initial_conditions import fitted_initial_states
 from .observables import (
     image_number_density_statistics,
+    predicted_loop_log_intensity,
     predicted_loop_logpdf,
     predicted_observed_number_density,
+    theta_for_image_visibility,
 )
 from .parameters import unpack_theta
 from .simulation import simulate_all_temperatures
@@ -73,8 +77,29 @@ def image_count_deviance(
 
     counts = np.asarray(counts, dtype=float)
     volumes = np.asarray(volumes, dtype=float)
-    if counts.size == 0 or predicted_density <= 0.0:
-        raise ValueError("Image counts and predicted density must be positive.")
+    if counts.size == 0:
+        raise ValueError("Image counts must be positive.")
+
+    if isinstance(predicted_density, Mapping):
+        predicted_densities = np.asarray(
+            [
+                float(predicted_density[str(image_id)])
+                for image_id, _ in group.groupby("image", sort=True)
+            ],
+            dtype=float,
+        )
+    else:
+        predicted_densities = np.full(
+            counts.shape,
+            float(predicted_density),
+            dtype=float,
+        )
+    if (
+        predicted_densities.shape != counts.shape
+        or np.any(~np.isfinite(predicted_densities))
+        or np.any(predicted_densities <= 0.0)
+    ):
+        raise ValueError("Predicted image densities must be positive and finite.")
 
     image_densities = counts / volumes
     if counts.size > 1:
@@ -90,7 +115,7 @@ def image_count_deviance(
         empirical_overdispersion = 0.0
 
     alpha = max(float(overdispersion_floor), empirical_overdispersion)
-    predicted_counts = float(predicted_density) * volumes
+    predicted_counts = predicted_densities * volumes
     fitted_logpmf = _negative_binomial_logpmf(
         counts,
         predicted_counts,
@@ -123,6 +148,25 @@ def total_objective(
         parameter_temperatures,
         specs=parameter_specs,
     )
+    theta["faulted_distribution"] = fit_config.faulted_distribution
+    if fit_config.apply_smooth_visibility:
+        theta.update(
+            {
+                "Rvis_DF_nm": fit_config.Rvis_DF_nm,
+                "dRvis_DF_nm": fit_config.dRvis_DF_nm,
+                "Rvis_BF_nm": fit_config.Rvis_BF_nm,
+                "dRvis_BF_nm": fit_config.dRvis_BF_nm,
+                "image_visibility_rvis_nm": dict(
+                    fit_config.image_visibility_rvis_nm
+                ),
+                "image_visibility_offsets_nm": dict(
+                    fit_config.image_visibility_offsets_nm
+                ),
+                "image_visibility_efficiency": dict(
+                    fit_config.image_visibility_efficiency
+                ),
+            }
+        )
 
     initial_states = fitted_initial_states(theta, material, event_series)
 
@@ -169,32 +213,42 @@ def total_objective(
         observation_config = ObservationConfig()
         if fit_config.objective_mode == "image_balanced_extended":
             image_losses = []
-            for _, image_data in group.groupby("image", sort=True):
-                logpdf = predicted_loop_logpdf(
+            predicted_densities = {}
+            for image_id, image_data in group.groupby("image", sort=True):
+                image_theta = theta_for_image_visibility(
+                    theta,
+                    series_id=series_id,
+                    event_order=event_order,
+                    mode=mode,
+                    image_id=image_id,
+                )
+                predicted_density = predicted_observed_number_density(
+                    mode=mode,
+                    prediction=prediction,
+                    theta=image_theta,
+                    observation_config=observation_config,
+                    radius_unit_to_nm=radius_unit_to_nm,
+                )
+                if predicted_density <= 0.0 or not np.isfinite(predicted_density):
+                    return PENALTY
+                predicted_densities[str(image_id)] = predicted_density
+                log_intensity = predicted_loop_log_intensity(
                     values_nm=image_data["size"].to_numpy(dtype=float),
                     mode=mode,
                     prediction=prediction,
-                    fit_theta=theta,
+                    theta=image_theta,
                     radius_unit_to_nm=radius_unit_to_nm,
                     observation_config=observation_config,
                 )
+                logpdf = log_intensity - np.log(predicted_density)
                 if len(logpdf) == 0 or not np.all(np.isfinite(logpdf)):
                     return PENALTY
                 image_losses.append(-float(np.mean(logpdf)))
 
-            predicted_density = predicted_observed_number_density(
-                mode=mode,
-                prediction=prediction,
-                theta=theta,
-                observation_config=observation_config,
-                radius_unit_to_nm=radius_unit_to_nm,
-            )
-            if predicted_density <= 0.0 or not np.isfinite(predicted_density):
-                return PENALTY
             try:
                 count_loss, _ = image_count_deviance(
                     group,
-                    predicted_density,
+                    predicted_densities,
                     fit_config.count_overdispersion_floor,
                 )
             except ValueError:

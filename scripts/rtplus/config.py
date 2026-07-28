@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -95,15 +95,35 @@ class FitConfig:
     objective_mode: str = "image_balanced_extended"
     # NB2 alpha floor.  alpha=0.04 gives a 20% asymptotic count CV.
     count_overdispersion_floor: float = 0.04
+    # Positive size-distribution family used for faulted loops in both DF and
+    # the faulted contribution to BF.
+    faulted_distribution: str = "normal"
+    # Smooth TEM visibility is treated as a calibrated observation setting,
+    # not inferred from the same histograms whose physical width is being fit.
+    # Fitting both simultaneously is poorly identifiable.
+    apply_smooth_visibility: bool = True
+    Rvis_DF_nm: float = 0.50
+    dRvis_DF_nm: float = 0.15
+    Rvis_BF_nm: float = 1.00
+    dRvis_BF_nm: float = 0.25
+    # Relative image thresholds are calibrated before the physical fit from
+    # same-event, same-mode size contrasts.  The offsets are centered within
+    # each comparison group and frozen during RT+ optimization.
+    image_specific_visibility: bool = True
+    visibility_offset_sd_nm: float = 0.20
+    visibility_max_offset_nm: float = 0.50
+    image_visibility_rvis_nm: Mapping[tuple, float] = field(default_factory=dict)
+    image_visibility_offsets_nm: Mapping[tuple, float] = field(default_factory=dict)
+    image_visibility_efficiency: Mapping[tuple, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ObservationConfig:
     """TEM visibility and resolution model from Bawane et al., Eqs. 2-6.
 
-    Resolution limits are radii because the source equations integrate a
-    radius distribution.  The fitted raw-size distributions remain
-    lognormal; these limits are used to predict observable number density.
+    The fitted smooth visibility parameters are radii, matching the physical
+    visibility function w(R). The older hard resolution limits remain
+    available only for explicit legacy checks.
     """
 
     relrod_faulted_visibility: float = 0.25

@@ -6,6 +6,7 @@ import unittest
 
 import numpy as np
 import pandas as pd
+from scipy.stats import truncnorm
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,10 +20,15 @@ from rtplus.observables import (
     binned_loop_number_density,
     binned_loop_number_density_from_images,
     image_number_density_statistics,
+    loop_size_logpdf,
+    positive_centered_normal_parameters,
     predicted_loop_logpdf,
     predicted_loop_number_density_distribution,
     predicted_mean_radii_nm,
     predicted_observed_number_density,
+    theta_for_image_visibility,
+    truncated_normal_parameters_from_mean_and_k,
+    visibility_log_weight,
 )
 from rtplus.ode import rhs
 from rtplus.parameters import (
@@ -41,6 +47,7 @@ from rtplus.physics import (
 )
 from rtplus.simulation import simulate_all_series
 from rtplus.reporting import print_final_parameter_tables
+from rtplus.visibility_calibration import calibrate_image_visibility
 
 
 class SimulationV3Tests(unittest.TestCase):
@@ -147,6 +154,207 @@ class SimulationV3Tests(unittest.TestCase):
         bf_density = predicted_observed_number_density("BF", prediction, theta, cfg)
         self.assertAlmostEqual(df_density, 0.25 * prediction["Cf"])
         self.assertAlmostEqual(bf_density, prediction["Cf"] + 0.5 * prediction["Cp"])
+
+    def test_smooth_visibility_suppresses_small_loops_consistently(self):
+        prediction = {"Rf": 1e-7, "Rp": 2e-7, "Cf": 8e16, "Cp": 4e16}
+        theta = {
+            "k_f": 0.5,
+            "k_p": 0.5,
+            "Rvis_DF_nm": 1.0,
+            "dRvis_DF_nm": 0.2,
+        }
+        weights = np.exp(
+            visibility_log_weight(
+                np.array([0.5, 2.0, 5.0]),
+                "DF",
+                theta,
+            )
+        )
+        self.assertTrue(np.all(np.diff(weights) > 0.0))
+        corrected_density = predicted_observed_number_density(
+            "DF",
+            prediction,
+            theta,
+        )
+        self.assertGreater(corrected_density, 0.0)
+        self.assertLess(corrected_density, 0.25 * prediction["Cf"])
+
+        x_nm = np.geomspace(1.0e-4, 1.0e3, 30000)
+        spectrum = predicted_loop_number_density_distribution(
+            x_nm,
+            "DF",
+            prediction,
+            theta,
+        )
+        np.testing.assert_allclose(
+            float(np.trapezoid(spectrum, x_nm)) / corrected_density,
+            1.0,
+            rtol=2.0e-4,
+        )
+
+    def test_image_specific_visibility_activates_only_selected_threshold(self):
+        key = ("irradiated", 1, "DF", "Image B")
+        theta = {
+            "Rvis_DF_nm": 0.5,
+            "dRvis_DF_nm": 0.15,
+            "image_visibility_rvis_nm": {key: 0.8},
+            "image_visibility_efficiency": {key: 0.6},
+        }
+        image_a = theta_for_image_visibility(
+            theta,
+            series_id="irradiated",
+            event_order=1,
+            mode="DF",
+            image_id="Image A",
+        )
+        image_b = theta_for_image_visibility(
+            theta,
+            series_id="irradiated",
+            event_order=1,
+            mode="DF",
+            image_id="Image B",
+        )
+        self.assertIs(image_a, theta)
+        self.assertAlmostEqual(image_b["Rvis_DF_nm"], 0.8)
+        self.assertAlmostEqual(image_b["visibility_efficiency_DF"], 0.6)
+        self.assertAlmostEqual(theta["Rvis_DF_nm"], 0.5)
+
+    def test_same_event_calibration_recovers_relative_visibility_order(self):
+        rng = np.random.default_rng(4)
+        physical_diameters = rng.lognormal(
+            mean=np.log(2.5),
+            sigma=0.45,
+            size=30000,
+        )
+        rows = []
+        for image_id, threshold_nm in (
+            ("Image A", 0.30),
+            ("Image B", 0.80),
+        ):
+            probability = 1.0 / (
+                1.0
+                + np.exp(
+                    -(
+                        0.5 * physical_diameters - threshold_nm
+                    )
+                    / 0.15
+                )
+            )
+            accepted = physical_diameters[
+                rng.random(len(physical_diameters)) < probability
+            ][:4000]
+            rows.extend(
+                {
+                    "series_id": "irradiated",
+                    "event_order": 1,
+                    "mode": "DF",
+                    "image": image_id,
+                    "size": diameter,
+                    "volume_nm3_effective": 1.0e6,
+                }
+                for diameter in accepted
+            )
+        calibration = calibrate_image_visibility(
+            pd.DataFrame(rows),
+            series_ids={"irradiated"},
+            base_rvis_by_mode_nm={"DF": 0.5},
+            transition_by_mode_nm={"DF": 0.15},
+            offset_sd_nm=0.2,
+            max_offset_nm=0.5,
+        )
+        key_a = ("irradiated", 1, "DF", "Image A")
+        key_b = ("irradiated", 1, "DF", "Image B")
+        self.assertLess(
+            calibration.rvis_by_image_nm[key_a],
+            calibration.rvis_by_image_nm[key_b],
+        )
+        self.assertAlmostEqual(
+            calibration.offset_by_image_nm[key_a]
+            + calibration.offset_by_image_nm[key_b],
+            0.0,
+            places=12,
+        )
+
+    def test_visibility_calibration_uses_loop_density_per_volume(self):
+        common_sizes = np.linspace(1.0, 4.0, 500)
+        rows = []
+        for image_id, volume_nm3 in (
+            ("Image A", 1.0e6),
+            ("Image B", 2.0e6),
+        ):
+            rows.extend(
+                {
+                    "series_id": "irradiated",
+                    "event_order": 1,
+                    "mode": "DF",
+                    "image": image_id,
+                    "size": diameter,
+                    "volume_nm3_effective": volume_nm3,
+                }
+                for diameter in common_sizes
+            )
+        calibration = calibrate_image_visibility(
+            pd.DataFrame(rows),
+            series_ids={"irradiated"},
+            base_rvis_by_mode_nm={"DF": 0.5},
+            transition_by_mode_nm={"DF": 0.15},
+            offset_sd_nm=0.2,
+            max_offset_nm=0.5,
+        )
+        key_a = ("irradiated", 1, "DF", "Image A")
+        key_b = ("irradiated", 1, "DF", "Image B")
+        self.assertGreater(
+            calibration.efficiency_by_image[key_a],
+            calibration.efficiency_by_image[key_b],
+        )
+
+    def test_truncated_normal_preserves_requested_mean_and_width(self):
+        requested_mean = 3.2
+        requested_k = 0.55
+        location, scale, lower = truncated_normal_parameters_from_mean_and_k(
+            requested_mean,
+            requested_k,
+        )
+        mean, variance = truncnorm.stats(
+            a=lower,
+            b=np.inf,
+            loc=location,
+            scale=scale,
+            moments="mv",
+        )
+        self.assertAlmostEqual(float(mean), requested_mean, places=11)
+        self.assertAlmostEqual(
+            float(np.sqrt(variance) / mean),
+            requested_k,
+            places=11,
+        )
+        logpdf = loop_size_logpdf(
+            np.array([-1.0, 1.0, 3.0]),
+            requested_mean,
+            requested_k,
+            "truncated_normal",
+        )
+        self.assertEqual(logpdf[0], -np.inf)
+        self.assertTrue(np.all(np.isfinite(logpdf[1:])))
+
+    def test_positive_centered_normal_remains_bell_shaped(self):
+        center = 3.0
+        k = 1.0 / 3.0
+        location, scale, lower = positive_centered_normal_parameters(
+            center,
+            k,
+        )
+        self.assertAlmostEqual(location, center)
+        self.assertAlmostEqual(scale, 1.0)
+        self.assertAlmostEqual(lower, -3.0)
+        logpdf = loop_size_logpdf(
+            np.array([2.0, 3.0, 4.0]),
+            center,
+            k,
+            "normal",
+        )
+        self.assertAlmostEqual(logpdf[0], logpdf[2], places=12)
+        self.assertGreater(logpdf[1], logpdf[0])
 
     def test_fitted_bf_faulted_detection_efficiency_changes_only_bf(self):
         prediction = {"Rf": 1e-7, "Rp": 2e-7, "Cf": 8e16, "Cp": 4e16}
@@ -298,6 +506,13 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertAlmostEqual(matched_loss, 0.0, places=12)
         self.assertAlmostEqual(alpha, 0.04)
         self.assertGreater(mismatched_loss, matched_loss)
+
+        image_specific_loss, _ = image_count_deviance(
+            group,
+            predicted_density={"A": 1.0e16, "B": 1.0e16},
+            overdispersion_floor=0.04,
+        )
+        self.assertAlmostEqual(image_specific_loss, matched_loss, places=12)
 
     def test_events_are_sequential(self):
         states = fitted_initial_states(self.theta, self.material, self.event_series)

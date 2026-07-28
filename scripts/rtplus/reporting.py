@@ -1,11 +1,16 @@
 """Console reporting for fitted RT+ parameters and derived event values."""
 from __future__ import annotations
 
+import numpy as np
+
 from .config import ObservationConfig
 from .observables import (
     effective_bf_faulted_visibility,
+    faulted_distribution_family,
     faulted_width_for_prediction,
     predicted_mean_diameters_nm,
+    predicted_visible_mean_diameters_nm,
+    visible_fraction_of_distribution,
 )
 from .parameters import faulted_width_at_temperature
 
@@ -37,6 +42,13 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         print(f"\nFinal objective: {float(objective):.8g}")
 
     fitted_rows = [
+        (
+            "faulted family",
+            "Faulted-loop size distribution",
+            faulted_distribution_family(theta),
+            "-",
+            "selected",
+        ),
         ("D0", "Interstitial diffusion prefactor", _format_value(material.D0), "cm^2/s", "fixed"),
         ("Em", "Interstitial migration energy", _format_value(theta["Em"]), "eV", "fitted"),
         ("P0", "Perfect-loop coalescence prefactor", _format_value(theta["P0"]), "cm^3/s", "fitted"),
@@ -45,7 +57,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         ("Ea_f", "Faulted-loop coalescence barrier", _format_value(theta["Ea_f"]), "eV", "fitted"),
         (
             "k_f(as-irradiated)",
-            "Faulted distribution std/mean",
+            "Faulted Gaussian sigma/center",
             _format_value(faulted_width_at_temperature(theta)),
             "-",
             "fitted",
@@ -59,11 +71,44 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
             "fitted",
         ),
     ]
+    if "Rvis_DF_nm" in theta:
+        fitted_rows.extend(
+            [
+                (
+                    "Rvis_DF",
+                    "DF base 50% visibility radius",
+                    _format_value(theta["Rvis_DF_nm"]),
+                    "nm",
+                    "fixed",
+                ),
+                (
+                    "dRvis_DF",
+                    "DF visibility transition width",
+                    _format_value(theta["dRvis_DF_nm"]),
+                    "nm",
+                    "fixed",
+                ),
+                (
+                    "Rvis_BF",
+                    "BF base 50% visibility radius",
+                    _format_value(theta["Rvis_BF_nm"]),
+                    "nm",
+                    "fixed",
+                ),
+                (
+                    "dRvis_BF",
+                    "BF visibility transition width",
+                    _format_value(theta["dRvis_BF_nm"]),
+                    "nm",
+                    "fixed",
+                ),
+            ]
+        )
     for temperature_C, value in sorted(theta.get("k_f_by_T", {}).items()):
         fitted_rows.append(
             (
                 f"k_f({temperature_C:g} C)",
-                "Faulted distribution std/mean",
+                "Faulted Gaussian sigma/center",
                 _format_value(value),
                 "-",
                 "fitted",
@@ -90,6 +135,38 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         initial_rows.insert(1, ("Cv0", _format_value(theta["Cv0"]), "cm^-3"))
     print("\nFITTED INITIAL CONDITIONS")
     _print_table(("Parameter", "Value", "Units"), initial_rows)
+
+    image_thresholds = theta.get("image_visibility_rvis_nm", {})
+    image_offsets = theta.get("image_visibility_offsets_nm", {})
+    image_efficiencies = theta.get("image_visibility_efficiency", {})
+    if image_thresholds:
+        calibration_rows = []
+        for key, radius_nm in sorted(image_thresholds.items()):
+            series_id, event_order, mode, image_id = key
+            calibration_rows.append(
+                (
+                    series_id,
+                    event_order,
+                    mode,
+                    image_id,
+                    _format_value(image_offsets.get(key, 0.0)),
+                    _format_value(radius_nm),
+                    _format_value(image_efficiencies.get(key, 1.0)),
+                )
+            )
+        print("\nFROZEN IMAGE-SPECIFIC VISIBILITY VALUES")
+        _print_table(
+            (
+                "Series",
+                "Event",
+                "Mode",
+                "Image",
+                "Offset (nm)",
+                "Rvis (nm)",
+                "Efficiency",
+            ),
+            calibration_rows,
+        )
 
     event_rows = []
     observation_config = ObservationConfig()
@@ -137,4 +214,123 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
             "Puf (1/s)",
         ),
         event_rows,
+    )
+
+    visibility_rows = []
+    family_f = faulted_distribution_family(theta)
+    image_thresholds = theta.get("image_visibility_rvis_nm", {})
+    image_efficiencies = theta.get("image_visibility_efficiency", {})
+
+    def local_thetas(event_order, mode):
+        selected_items = [
+            (key, radius_nm)
+            for key, radius_nm in image_thresholds.items()
+            if key[0] == "irradiated"
+            and key[1] == event_order
+            and key[2] == mode
+        ]
+        if not selected_items:
+            return [theta]
+        results = []
+        for key, radius_nm in selected_items:
+            local_theta = dict(theta)
+            local_theta[f"Rvis_{mode}_nm"] = float(radius_nm)
+            local_theta[f"visibility_efficiency_{mode}"] = float(
+                image_efficiencies.get(key, 1.0)
+            )
+            results.append(local_theta)
+        return results
+
+    for event_order, prediction in sorted(predictions.items()):
+        Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, theta)
+        k_f = faulted_width_for_prediction(prediction, theta)
+        df_thetas = local_thetas(event_order, "DF")
+        bf_thetas = local_thetas(event_order, "BF")
+        df_visible_means = [
+            predicted_visible_mean_diameters_nm(
+                "DF",
+                prediction,
+                local_theta,
+            )
+            for local_theta in df_thetas
+        ]
+        bf_visible_means = [
+            predicted_visible_mean_diameters_nm(
+                "BF",
+                prediction,
+                local_theta,
+            )
+            for local_theta in bf_thetas
+        ]
+        visible_Df_DF_nm = float(np.mean([item[0] for item in df_visible_means]))
+        visible_Df_BF_nm = float(np.mean([item[0] for item in bf_visible_means]))
+        visible_Dp_BF_nm = float(np.mean([item[1] for item in bf_visible_means]))
+        fraction_Df_DF = float(
+            np.mean(
+                [
+                    visible_fraction_of_distribution(
+                        Df_nm,
+                        k_f,
+                        family_f,
+                        "DF",
+                        local_theta,
+                    )
+                    for local_theta in df_thetas
+                ]
+            )
+        )
+        fraction_Df_BF = float(
+            np.mean(
+                [
+                    visible_fraction_of_distribution(
+                        Df_nm,
+                        k_f,
+                        family_f,
+                        "BF",
+                        local_theta,
+                    )
+                    for local_theta in bf_thetas
+                ]
+            )
+        )
+        fraction_Dp_BF = float(
+            np.mean(
+                [
+                    visible_fraction_of_distribution(
+                        Dp_nm,
+                        theta["k_p"],
+                        "lognormal",
+                        "BF",
+                        local_theta,
+                    )
+                    for local_theta in bf_thetas
+                ]
+            )
+        )
+        visibility_rows.append(
+            (
+                event_order,
+                f"{prediction['temperature_C']:g}",
+                _format_value(fraction_Df_DF),
+                _format_value(visible_Df_DF_nm),
+                _format_value(fraction_Df_BF),
+                _format_value(visible_Df_BF_nm),
+                _format_value(fraction_Dp_BF),
+                _format_value(visible_Dp_BF_nm),
+            )
+        )
+
+    print("\nDERIVED IMAGE-AVERAGED VISIBILITY VALUES")
+    _print_table(
+        (
+            "Event",
+            "T (C)",
+            "DF <w_f>",
+            "DF visible Df (nm)",
+            "BF <w_f>",
+            "BF visible Df (nm)",
+            "BF <w_p>",
+            "BF visible Dp (nm)",
+        ),
+        visibility_rows,
     )

@@ -40,11 +40,16 @@ from rtplus.observables import (
     image_number_density_statistics,
     predicted_mean_diameters_nm,
     predicted_observed_number_density,
+    theta_for_image_visibility,
 )
 from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, parameter_specs, unpack_theta
 from rtplus.plotting import plot_meeting_results
 from rtplus.reporting import print_final_parameter_tables
 from rtplus.simulation import simulate_all_series
+from rtplus.visibility_calibration import (
+    calibrate_image_visibility,
+    print_visibility_calibration,
+)
 
 
 # Fit only the irradiated specimen history for now.
@@ -80,6 +85,44 @@ def parse_args():
         default=0.04,
         help="Minimum NB2 count overdispersion; 0.04 corresponds to 20%% image-level CV.",
     )
+    p.add_argument(
+        "--faulted-distribution",
+        choices=["normal", "lognormal", "truncated_normal"],
+        default="normal",
+        help=(
+            "Faulted-loop size family used consistently in DF and BF. "
+            "Default: positive-centered Gaussian."
+        ),
+    )
+    p.add_argument(
+        "--no-smooth-visibility",
+        action="store_true",
+        help="Disable the smooth TEM small-loop detectability correction.",
+    )
+    p.add_argument("--df-rvis-nm", type=float, default=0.50, help="DF 50%% visibility radius in nm.")
+    p.add_argument("--df-drvis-nm", type=float, default=0.15, help="DF visibility transition width in nm.")
+    p.add_argument("--bf-rvis-nm", type=float, default=1.00, help="BF 50%% visibility radius in nm.")
+    p.add_argument("--bf-drvis-nm", type=float, default=0.25, help="BF visibility transition width in nm.")
+    p.add_argument(
+        "--no-image-specific-visibility",
+        action="store_true",
+        help=(
+            "Use only the mode-level visibility thresholds instead of "
+            "pre-calibrated relative image thresholds."
+        ),
+    )
+    p.add_argument(
+        "--visibility-offset-sd-nm",
+        type=float,
+        default=0.20,
+        help="Shrinkage scale for centered image visibility offsets in nm.",
+    )
+    p.add_argument(
+        "--visibility-max-offset-nm",
+        type=float,
+        default=0.50,
+        help="Maximum absolute image visibility offset in nm.",
+    )
     p.add_argument("--debug-only", action="store_true", help="Run theta0 forward simulation and stop before fitting.")
     p.add_argument("--no-plot", action="store_true", help="Skip plots after fitting.")
     p.add_argument("--plot-dir", type=Path, default=PROJECT_ROOT / "Results", help="Directory for meeting-ready PNG plots.")
@@ -90,6 +133,15 @@ def main():
     args = parse_args()
     if args.count_overdispersion_floor <= 0.0:
         raise ValueError("--count-overdispersion-floor must be positive.")
+    if min(
+        args.df_rvis_nm,
+        args.df_drvis_nm,
+        args.bf_rvis_nm,
+        args.bf_drvis_nm,
+        args.visibility_offset_sd_nm,
+        args.visibility_max_offset_nm,
+    ) <= 0.0:
+        raise ValueError("Visibility radii, widths, and offset scales must be positive.")
 
     material = replace(
         MaterialConstants(),
@@ -106,6 +158,15 @@ def main():
         maxiter=args.maxiter,
         objective_mode=args.objective_mode,
         count_overdispersion_floor=args.count_overdispersion_floor,
+        faulted_distribution=args.faulted_distribution,
+        apply_smooth_visibility=not args.no_smooth_visibility,
+        Rvis_DF_nm=args.df_rvis_nm,
+        dRvis_DF_nm=args.df_drvis_nm,
+        Rvis_BF_nm=args.bf_rvis_nm,
+        dRvis_BF_nm=args.bf_drvis_nm,
+        image_specific_visibility=not args.no_image_specific_visibility,
+        visibility_offset_sd_nm=args.visibility_offset_sd_nm,
+        visibility_max_offset_nm=args.visibility_max_offset_nm,
     )
     data_config = DataConfig(data_dir=args.data_dir)
 
@@ -127,12 +188,59 @@ def main():
             for series_id, events in FIT_EVENT_SERIES.items()
         }
 
+    if (
+        fit_config.apply_smooth_visibility
+        and fit_config.image_specific_visibility
+    ):
+        visibility_calibration = calibrate_image_visibility(
+            loop_data,
+            series_ids=event_series,
+            base_rvis_by_mode_nm={
+                "DF": fit_config.Rvis_DF_nm,
+                "BF": fit_config.Rvis_BF_nm,
+            },
+            transition_by_mode_nm={
+                "DF": fit_config.dRvis_DF_nm,
+                "BF": fit_config.dRvis_BF_nm,
+            },
+            offset_sd_nm=fit_config.visibility_offset_sd_nm,
+            max_offset_nm=fit_config.visibility_max_offset_nm,
+        )
+        fit_config = replace(
+            fit_config,
+            image_visibility_rvis_nm=visibility_calibration.rvis_by_image_nm,
+            image_visibility_offsets_nm=visibility_calibration.offset_by_image_nm,
+            image_visibility_efficiency=(
+                visibility_calibration.efficiency_by_image
+            ),
+        )
+        print_visibility_calibration(visibility_calibration)
+
     parameter_temperatures = get_parameter_temperatures(event_series)
     print("\nTemperatures with fitted event parameters:", parameter_temperatures)
 
     specs = parameter_specs(material.enable_vacancy_extension)
     theta0, _ = build_theta0_and_bounds(parameter_temperatures, specs=specs)
     theta_debug = unpack_theta(theta0, parameter_temperatures, specs=specs)
+    theta_debug["faulted_distribution"] = fit_config.faulted_distribution
+    if fit_config.apply_smooth_visibility:
+        theta_debug.update(
+            {
+                "Rvis_DF_nm": fit_config.Rvis_DF_nm,
+                "dRvis_DF_nm": fit_config.dRvis_DF_nm,
+                "Rvis_BF_nm": fit_config.Rvis_BF_nm,
+                "dRvis_BF_nm": fit_config.dRvis_BF_nm,
+                "image_visibility_rvis_nm": dict(
+                    fit_config.image_visibility_rvis_nm
+                ),
+                "image_visibility_offsets_nm": dict(
+                    fit_config.image_visibility_offsets_nm
+                ),
+                "image_visibility_efficiency": dict(
+                    fit_config.image_visibility_efficiency
+                ),
+            }
+        )
     initial_states = fitted_initial_states(theta_debug, material, event_series)
     for series_id, state in initial_states.items():
         print(f"\nSeries: {series_id}\n" + describe_y0(state, material))
@@ -220,14 +328,34 @@ def main():
             ]
             if group.empty:
                 continue
-            predicted_density = predicted_observed_number_density(mode, prediction, best.theta)
+            predicted_by_image = []
+            for image_id, _ in group.groupby("image", sort=True):
+                image_theta = theta_for_image_visibility(
+                    best.theta,
+                    series_id="irradiated",
+                    event_order=event_order,
+                    mode=mode,
+                    image_id=image_id,
+                )
+                predicted_by_image.append(
+                    predicted_observed_number_density(
+                        mode,
+                        prediction,
+                        image_theta,
+                    )
+                )
+            predicted_density = float(
+                sum(predicted_by_image) / len(predicted_by_image)
+            )
             observed_density, observed_std = image_number_density_statistics(
                 group["image"].to_numpy(),
                 group["volume_cm3"].to_numpy(dtype=float),
             )
             print(
                 f"  event={event_order}, mode={mode}: "
-                f"predicted={predicted_density:.3e}, "
+                f"mean predicted={predicted_density:.3e} "
+                f"[{min(predicted_by_image):.3e}, "
+                f"{max(predicted_by_image):.3e}], "
                 f"measured={observed_density:.3e} +/- {observed_std:.3e} cm^-3"
             )
 
