@@ -6,6 +6,7 @@ from scipy.special import logsumexp
 from scipy.stats import lognorm
 
 from .config import ObservationConfig
+from .parameters import faulted_width_at_temperature
 from .physics import lognormal_mean_radius_from_rms
 from .simulation import Prediction
 
@@ -51,6 +52,21 @@ def lognormal_survival_from_mean_and_k(cutoff, mean: float, k: float) -> float:
     return float(lognorm.sf(float(cutoff), s=sigma_logn, scale=np.exp(mu_logn)))
 
 
+def faulted_width_for_prediction(prediction, theta: dict) -> float:
+    """Return the faulted-loop width associated with a predicted event."""
+
+    if isinstance(prediction, dict):
+        metadata = prediction.get("metadata", {})
+        temperature_C = (
+            None
+            if metadata.get("simulated") is False
+            else prediction.get("temperature_C")
+        )
+    else:
+        temperature_C = getattr(prediction, "temperature_C", None)
+    return faulted_width_at_temperature(theta, temperature_C)
+
+
 def predicted_mean_radii_nm(
     prediction,
     theta: dict,
@@ -61,8 +77,9 @@ def predicted_mean_radii_nm(
         Rf_rms, Rp_rms = prediction["Rf"], prediction["Rp"]
     else:
         Rf_rms, Rp_rms = prediction.Rf, prediction.Rp
+    k_f = faulted_width_for_prediction(prediction, theta)
     return (
-        lognormal_mean_radius_from_rms(Rf_rms, theta["k_f"]) * radius_unit_to_nm,
+        lognormal_mean_radius_from_rms(Rf_rms, k_f) * radius_unit_to_nm,
         lognormal_mean_radius_from_rms(Rp_rms, theta["k_p"]) * radius_unit_to_nm,
     )
 
@@ -101,12 +118,13 @@ def predicted_observed_number_density(
         Cf, Cp = prediction.Cf, prediction.Cp
 
     Rf_nm, Rp_nm = predicted_mean_radii_nm(prediction, theta, radius_unit_to_nm)
+    k_f = faulted_width_for_prediction(prediction, theta)
 
     if mode == "DF":
         visible_f = 1.0
         if cfg.apply_resolution_cutoff:
             visible_f = lognormal_survival_from_mean_and_k(
-                cfg.relrod_resolution_radius_nm, Rf_nm, theta["k_f"]
+                cfg.relrod_resolution_radius_nm, Rf_nm, k_f
             )
         return float(cfg.relrod_faulted_visibility * Cf * visible_f)
 
@@ -116,7 +134,7 @@ def predicted_observed_number_density(
         visible_p = 1.0
         if cfg.apply_resolution_cutoff:
             visible_f = lognormal_survival_from_mean_and_k(
-                cfg.bf_resolution_radius_nm, Rf_nm, theta["k_f"]
+                cfg.bf_resolution_radius_nm, Rf_nm, k_f
             )
             visible_p = lognormal_survival_from_mean_and_k(
                 cfg.bf_resolution_radius_nm, Rp_nm, theta["k_p"]
@@ -163,7 +181,7 @@ def predicted_loop_log_intensity(
         Rf, Rp = prediction.Rf, prediction.Rp
         Cf, Cp = prediction.Cf, prediction.Cp
 
-    k_f = theta["k_f"]
+    k_f = faulted_width_for_prediction(prediction, theta)
     k_p = theta["k_p"]
 
     Df_nm, Dp_nm = predicted_mean_diameters_nm(

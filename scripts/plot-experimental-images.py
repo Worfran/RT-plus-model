@@ -13,7 +13,8 @@ Run from the project root:
 
     python scripts/plot-experimental-images.py
     python scripts/plot-experimental-images.py --series pristine
-    python scripts/plot-experimental-images.py --series all --bin-width-nm 0.5
+    python scripts/plot-experimental-images.py --focus-quantile 0.975
+    python scripts/plot-experimental-images.py --binning fixed --bin-width-nm 0.5
 """
 from __future__ import annotations
 
@@ -55,10 +56,28 @@ def parse_args():
         help="Specimen series to plot.",
     )
     parser.add_argument(
+        "--binning",
+        choices=["fd", "fixed"],
+        default="fd",
+        help=(
+            "Diameter-bin selection: Freedman-Diaconis ('fd', default) or "
+            "a user-specified fixed width."
+        ),
+    )
+    parser.add_argument(
         "--bin-width-nm",
         type=float,
         default=1.0,
-        help="Fixed diameter-bin width in nm. Default: 1.0.",
+        help="Diameter-bin width used only with --binning fixed. Default: 1.0 nm.",
+    )
+    parser.add_argument(
+        "--focus-quantile",
+        type=float,
+        default=0.95,
+        help=(
+            "Upper pooled diameter quantile displayed for each mode. "
+            "Default: 0.95; use 1.0 for the full range."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -84,6 +103,8 @@ def main():
     args = parse_args()
     if args.bin_width_nm <= 0.0:
         raise ValueError("--bin-width-nm must be positive.")
+    if not 0.0 < args.focus_quantile <= 1.0:
+        raise ValueError("--focus-quantile must be in the interval (0, 1].")
     if args.dpi <= 0:
         raise ValueError("--dpi must be positive.")
 
@@ -104,7 +125,9 @@ def main():
             loop_data=loop_data,
             event_series=EVENT_SERIES,
             series_id=series_id,
+            binning=args.binning,
             bin_width_nm=args.bin_width_nm,
+            focus_quantile=args.focus_quantile,
         )
         events_by_order = {
             event.event_order: event

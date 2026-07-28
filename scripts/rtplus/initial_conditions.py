@@ -17,6 +17,7 @@ from .physics import (
     lognormal_rms_radius_from_mean,
     loop_content_from_radius,
 )
+from .parameters import faulted_width_at_temperature
 
 
 def loguniform(low: float, high: float, rng: np.random.Generator) -> float:
@@ -187,7 +188,10 @@ def fitted_initial_state(theta: dict, material: MaterialConstants) -> np.ndarray
         raise ValueError("Fitted initial conditions must be nonnegative.")
 
     Nf0 = loop_content_from_radius(
-        lognormal_rms_radius_from_mean(Rf0, theta["k_f"]),
+        lognormal_rms_radius_from_mean(
+            Rf0,
+            faulted_width_at_temperature(theta),
+        ),
         Cf0,
         material.b,
         material.Omega0,

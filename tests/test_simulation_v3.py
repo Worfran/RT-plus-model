@@ -25,7 +25,13 @@ from rtplus.observables import (
     predicted_observed_number_density,
 )
 from rtplus.ode import rhs
-from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, parameter_specs, unpack_theta
+from rtplus.parameters import (
+    build_theta0_and_bounds,
+    faulted_width_at_temperature,
+    get_parameter_temperatures,
+    parameter_specs,
+    unpack_theta,
+)
 from rtplus.physics import (
     compute_radius,
     lognormal_mean_radius_from_rms,
@@ -53,7 +59,11 @@ class SimulationV3Tests(unittest.TestCase):
         rf = compute_radius(nf, cf, self.material.b, self.material.Omega0)
         rp = compute_radius(np_, cp, self.material.b, self.material.Omega0)
         self.assertAlmostEqual(
-            lognormal_mean_radius_from_rms(rf, self.theta["k_f"]) * 1e7,
+            lognormal_mean_radius_from_rms(
+                rf,
+                faulted_width_at_temperature(self.theta),
+            )
+            * 1e7,
             self.theta["Rf0_nm"],
             places=12,
         )
@@ -79,6 +89,52 @@ class SimulationV3Tests(unittest.TestCase):
         )
         self.assertAlmostEqual(mean_f_nm, mean_radius * 1e7)
         self.assertAlmostEqual(mean_p_nm, mean_radius * 1e7)
+
+    def test_faulted_width_is_temperature_dependent(self):
+        self.assertIn("k_f_initial", self.theta)
+        self.assertEqual(
+            set(self.theta["k_f_by_T"]),
+            set(self.temperatures),
+        )
+        self.assertNotIn("k_f", self.theta)
+
+        theta = {
+            "k_f_initial": 0.2,
+            "k_f_by_T": {900.0: 0.7, 1100.0: 0.4},
+            "k_p": 0.5,
+        }
+        initial_prediction = {
+            "temperature_C": 25.0,
+            "metadata": {"simulated": False},
+            "Rf": 1.0e-7,
+            "Rp": 2.0e-7,
+            "Cf": 8.0e16,
+            "Cp": 4.0e16,
+        }
+        annealed_prediction = {
+            **initial_prediction,
+            "temperature_C": 900.0,
+            "metadata": {"simulated": True},
+        }
+
+        self.assertAlmostEqual(
+            faulted_width_at_temperature(theta),
+            0.2,
+        )
+        self.assertAlmostEqual(
+            faulted_width_at_temperature(theta, 900.0),
+            0.7,
+        )
+
+        initial_mean_f, _ = predicted_mean_radii_nm(
+            initial_prediction,
+            theta,
+        )
+        annealed_mean_f, _ = predicted_mean_radii_nm(
+            annealed_prediction,
+            theta,
+        )
+        self.assertGreater(initial_mean_f, annealed_mean_f)
 
     def test_visibility_factors_enter_number_density(self):
         prediction = {"Rf": 1e-7, "Rp": 2e-7, "Cf": 8e16, "Cp": 4e16}

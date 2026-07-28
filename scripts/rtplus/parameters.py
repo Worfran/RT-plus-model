@@ -52,11 +52,13 @@ KINETIC_PARAMETER_SPECS = (
     ParameterSpec("Ea_f", scope="global", transform="identity", initial=1.9, bounds=(0.1, 6.0)),
     ParameterSpec("P0_f", scope="global", transform="log", initial=1e-12, bounds=(1e-30, 1e-6)),
     ParameterSpec("Puf", scope="per_temperature", transform="log", initial=1e-5, bounds=(1e-10, 1e-2)),
-    # Rel-rod data directly identify the faulted-loop width.  Keeping k_f in
-    # the range supported by those pure-faulted datasets prevents the BF
-    # mixture from replacing a perfect-loop population with an unrealistically
-    # broad faulted tail.
-    ParameterSpec("k_f", scope="global", transform="log", initial=0.5, bounds=(0.10, 0.80)),
+    # Rel-rod data directly identify the faulted-loop width. The initial
+    # as-irradiated population has its own width and each simulated annealing
+    # temperature has another, allowing the distribution to broaden or narrow
+    # as the specimen evolves. The same event-specific width is also used for
+    # the faulted component of BF.
+    ParameterSpec("k_f_initial", scope="global", transform="log", initial=0.5, bounds=(0.10, 0.80)),
+    ParameterSpec("k_f", scope="per_temperature", transform="log", initial=0.5, bounds=(0.10, 0.80)),
     ParameterSpec("k_p", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
 )
 
@@ -162,6 +164,49 @@ def unpack_theta(theta_vec, temperatures: Iterable[float], specs=DEFAULT_PARAMET
         raise ValueError(f"Theta length mismatch. Used {idx}, got {len(theta_vec)}")
 
     return theta
+
+
+def faulted_width_at_temperature(
+    theta: dict,
+    temperature_C: float | None = None,
+) -> float:
+    """Return the faulted-loop coefficient of variation for one event.
+
+    ``k_f_initial`` applies to the as-irradiated observation. Annealed events
+    use ``k_f_by_T``. The legacy global ``k_f`` form remains accepted so that
+    lower-level helpers and old diagnostic inputs stay usable.
+    """
+
+    widths_by_temperature = theta.get("k_f_by_T", {})
+    if temperature_C is not None:
+        requested_temperature = float(temperature_C)
+        for stored_temperature, value in widths_by_temperature.items():
+            if np.isclose(
+                float(stored_temperature),
+                requested_temperature,
+                rtol=0.0,
+                atol=1.0e-9,
+            ):
+                return float(value)
+
+        if widths_by_temperature:
+            raise KeyError(
+                "Missing faulted-loop width for "
+                f"T={requested_temperature:g} C."
+            )
+
+    if temperature_C is None and "k_f_initial" in theta:
+        return float(theta["k_f_initial"])
+    if "k_f" in theta:
+        return float(theta["k_f"])
+
+    if temperature_C is None and len(widths_by_temperature) == 1:
+        return float(next(iter(widths_by_temperature.values())))
+
+    raise KeyError(
+        "Missing faulted-loop width: expected k_f_initial, k_f, or a "
+        "matching entry in k_f_by_T."
+    )
 
 
 def randomize_theta0(theta0, bounds, rng: np.random.Generator, scale: float = 0.35):

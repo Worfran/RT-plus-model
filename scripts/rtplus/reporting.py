@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from .config import ObservationConfig
-from .observables import effective_bf_faulted_visibility, predicted_mean_diameters_nm
+from .observables import (
+    effective_bf_faulted_visibility,
+    faulted_width_for_prediction,
+    predicted_mean_diameters_nm,
+)
+from .parameters import faulted_width_at_temperature
 
 
 def _format_value(value: float) -> str:
@@ -38,7 +43,13 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         ("Ea", "Perfect-loop coalescence barrier", _format_value(theta["Ea"]), "eV", "fitted"),
         ("P0_f", "Faulted-loop coalescence prefactor", _format_value(theta["P0_f"]), "cm^3/s", "fitted"),
         ("Ea_f", "Faulted-loop coalescence barrier", _format_value(theta["Ea_f"]), "eV", "fitted"),
-        ("k_f", "Faulted distribution std/mean", _format_value(theta["k_f"]), "-", "fitted"),
+        (
+            "k_f(as-irradiated)",
+            "Faulted distribution std/mean",
+            _format_value(faulted_width_at_temperature(theta)),
+            "-",
+            "fitted",
+        ),
         ("k_p", "Perfect distribution std/mean", _format_value(theta["k_p"]), "-", "fitted"),
         (
             "eta_BF,f",
@@ -48,6 +59,16 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
             "fitted",
         ),
     ]
+    for temperature_C, value in sorted(theta.get("k_f_by_T", {}).items()):
+        fitted_rows.append(
+            (
+                f"k_f({temperature_C:g} C)",
+                "Faulted distribution std/mean",
+                _format_value(value),
+                "-",
+                "fitted",
+            )
+        )
     for temperature_C, value in sorted(theta["Puf_by_T"].items()):
         fitted_rows.append(
             (f"Puf({temperature_C:g} C)", "Faulted-to-perfect conversion rate", _format_value(value), "1/s", "fitted")
@@ -79,6 +100,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
     for event_order, prediction in sorted(predictions.items()):
         metadata = prediction.get("metadata", {})
         Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, theta)
+        k_f = faulted_width_for_prediction(prediction, theta)
         visible_faulted_density = visible_bf_faulted * prediction["Cf"]
         visible_perfect_density = (
             observation_config.bf_perfect_visibility * prediction["Cp"]
@@ -91,6 +113,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
                 event_order,
                 f"{prediction['temperature_C']:g}",
                 _format_value(Df_nm),
+                _format_value(k_f),
                 _format_value(Dp_nm),
                 _format_value(bf_faulted_fraction),
                 _format_value(metadata.get("Di", 0.0)) if metadata.get("simulated") else "initial state",
@@ -105,6 +128,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
             "Event",
             "T (C)",
             "Df mean (nm)",
+            "k_f",
             "Dp mean (nm)",
             "BF faulted fraction",
             "Di (cm^2/s)",
