@@ -15,7 +15,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants, ObservationConfig
 from rtplus.data_loader import load_all_loop_data
 from rtplus.initial_conditions import fitted_initial_state, fitted_initial_states
-from rtplus.objective import image_count_deviance, total_objective
+from rtplus.objective import (
+    central_size_subset,
+    faulted_size_fit_fraction_for_prediction,
+    image_count_deviance,
+    total_objective,
+)
 from rtplus.observables import (
     binned_loop_number_density,
     binned_loop_number_density_from_images,
@@ -47,7 +52,10 @@ from rtplus.physics import (
 )
 from rtplus.simulation import simulate_all_series
 from rtplus.reporting import print_final_parameter_tables
-from rtplus.visibility_calibration import calibrate_image_visibility
+from rtplus.visibility_calibration import (
+    calibrate_image_visibility,
+    regularized_efficiency_update,
+)
 
 
 class SimulationV3Tests(unittest.TestCase):
@@ -80,6 +88,37 @@ class SimulationV3Tests(unittest.TestCase):
             places=12,
         )
         self.assertGreater(state[0], 1e10)
+
+    def test_central_size_subset_removes_only_symmetric_tails(self):
+        values = np.arange(1.0, 101.0)
+        retained, lower, upper = central_size_subset(values, 0.95)
+        self.assertAlmostEqual(lower, 3.475)
+        self.assertAlmostEqual(upper, 97.525)
+        np.testing.assert_array_equal(retained, np.arange(4.0, 98.0))
+        all_values, lower, upper = central_size_subset(values, 1.0)
+        np.testing.assert_array_equal(all_values, values)
+        self.assertEqual(lower, -np.inf)
+        self.assertEqual(upper, np.inf)
+
+    def test_1100_df_uses_the_complete_size_distribution(self):
+        fit_config = FitConfig(
+            faulted_size_fit_fraction=0.95,
+            faulted_full_distribution_temperatures=(1100.0,),
+        )
+        self.assertAlmostEqual(
+            faulted_size_fit_fraction_for_prediction(
+                {"temperature_C": 900.0},
+                fit_config,
+            ),
+            0.95,
+        )
+        self.assertAlmostEqual(
+            faulted_size_fit_fraction_for_prediction(
+                {"temperature_C": 1100.0},
+                fit_config,
+            ),
+            1.0,
+        )
 
     def test_lognormal_mean_and_second_moment_are_consistent(self):
         mean_radius = 1.7e-7
@@ -307,6 +346,17 @@ class SimulationV3Tests(unittest.TestCase):
             calibration.efficiency_by_image[key_a],
             calibration.efficiency_by_image[key_b],
         )
+
+    def test_regularized_efficiency_update_reduces_overprediction(self):
+        updated = regularized_efficiency_update(
+            current_efficiency=0.284,
+            observed_density=1.27,
+            predicted_density=4.97,
+            strength=0.75,
+        )
+        self.assertLess(updated, 0.284)
+        self.assertGreater(updated, 0.05)
+        self.assertAlmostEqual(updated, 0.1021, places=3)
 
     def test_truncated_normal_preserves_requested_mean_and_width(self):
         requested_mean = 3.2

@@ -17,7 +17,6 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import logsumexp
 
-
 VisibilityKey = tuple[str, int, str, str]
 
 
@@ -29,6 +28,106 @@ class VisibilityCalibration:
     offset_by_image_nm: dict[VisibilityKey, float]
     efficiency_by_image: dict[VisibilityKey, float]
     diagnostics: tuple[dict, ...]
+
+
+def regularized_efficiency_update(
+    current_efficiency,
+    observed_density,
+    predicted_density,
+    strength=0.75,
+    minimum_efficiency=0.05,
+):
+    """Update one frozen image efficiency toward its count residual.
+
+    ``strength < 1`` is geometric shrinkage: it corrects a systematic absolute
+    visibility mismatch without forcing every image count to match exactly.
+    """
+
+    current_efficiency = float(current_efficiency)
+    observed_density = float(observed_density)
+    predicted_density = float(predicted_density)
+    strength = float(strength)
+    if not 0.0 < current_efficiency <= 1.0:
+        raise ValueError("current_efficiency must be in (0, 1].")
+    if observed_density <= 0.0 or predicted_density <= 0.0:
+        raise ValueError("Observed and predicted densities must be positive.")
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("strength must be in [0, 1].")
+    updated = current_efficiency * (
+        observed_density / predicted_density
+    ) ** strength
+    return float(np.clip(updated, minimum_efficiency, 1.0))
+
+
+def refine_image_visibility_efficiencies(
+    loop_data,
+    *,
+    theta,
+    predictions,
+    current_efficiencies,
+    strength=0.75,
+    minimum_efficiency=0.05,
+):
+    """Refine frozen absolute efficiencies using one fitted physical state."""
+
+    # Local import avoids a module cycle: observables imports the canonical
+    # visibility_image_key from this module.
+    from .observables import (
+        predicted_observed_number_density,
+        theta_for_image_visibility,
+    )
+
+    refined = dict(current_efficiencies)
+    diagnostics = []
+    for (series_id, event_order, mode, image_id), image_data in loop_data.groupby(
+        ["series_id", "event_order", "mode", "image"],
+        sort=True,
+    ):
+        key = visibility_image_key(
+            series_id,
+            event_order,
+            mode,
+            image_id,
+        )
+        if key not in refined or series_id not in predictions:
+            continue
+        if int(event_order) not in predictions[series_id]:
+            continue
+        volumes = image_data["volume_cm3"].drop_duplicates().to_numpy(float)
+        if volumes.size != 1 or volumes[0] <= 0.0:
+            raise ValueError(f"Image {image_id!r} must have one positive volume.")
+        image_theta = theta_for_image_visibility(
+            theta,
+            series_id=series_id,
+            event_order=event_order,
+            mode=mode,
+            image_id=image_id,
+        )
+        predicted_density = predicted_observed_number_density(
+            mode,
+            predictions[series_id][int(event_order)],
+            image_theta,
+        )
+        observed_density = float(len(image_data)) / float(volumes[0])
+        old_efficiency = float(refined[key])
+        new_efficiency = regularized_efficiency_update(
+            old_efficiency,
+            observed_density,
+            predicted_density,
+            strength=strength,
+            minimum_efficiency=minimum_efficiency,
+        )
+        refined[key] = new_efficiency
+        diagnostics.append(
+            {
+                "key": key,
+                "old_efficiency": old_efficiency,
+                "new_efficiency": new_efficiency,
+                "observed_density": observed_density,
+                "predicted_density": predicted_density,
+            }
+        )
+    return refined, tuple(diagnostics)
 
 
 def visibility_image_key(

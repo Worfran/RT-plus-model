@@ -29,6 +29,48 @@ from .simulation import simulate_all_series
 PENALTY = 1e100
 
 
+def central_size_subset(values, retained_fraction=0.95):
+    """Return the central empirical fraction used by the robust size loss.
+
+    This filtering applies only to the conditional diameter likelihood.  The
+    image count/volume term deliberately retains every measured loop.
+    """
+
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values) & (values > 0.0)]
+    retained_fraction = float(retained_fraction)
+    if not 0.0 < retained_fraction <= 1.0:
+        raise ValueError("retained_fraction must be in the interval (0, 1].")
+    if values.size == 0 or retained_fraction == 1.0:
+        return values, -np.inf, np.inf
+
+    tail_fraction = 0.5 * (1.0 - retained_fraction)
+    lower, upper = np.quantile(
+        values,
+        [tail_fraction, 1.0 - tail_fraction],
+    )
+    retained = values[(values >= lower) & (values <= upper)]
+    if retained.size == 0:
+        raise ValueError("Central size filtering removed every observation.")
+    return retained, float(lower), float(upper)
+
+
+def faulted_size_fit_fraction_for_prediction(prediction, fit_config):
+    """Return the DF size fraction selected for one experimental event."""
+
+    temperature_C = float(prediction["temperature_C"])
+    full_temperatures = {
+        float(value)
+        for value in fit_config.faulted_full_distribution_temperatures
+    }
+    if any(
+        np.isclose(temperature_C, selected, rtol=0.0, atol=1.0e-9)
+        for selected in full_temperatures
+    ):
+        return 1.0
+    return float(fit_config.faulted_size_fit_fraction)
+
+
 def _negative_binomial_logpmf(counts, means, overdispersion):
     """NB2 log-PMF with Var(N) = mean + overdispersion * mean**2."""
 
@@ -209,12 +251,27 @@ def total_objective(
             return PENALTY
 
         prediction = predictions[series_id][event_order]
+        event_loss_weight = (
+            float(fit_config.room_temperature_loss_weight)
+            if prediction.get("metadata", {}).get("simulated") is False
+            else 1.0
+        )
+        faulted_size_fraction = faulted_size_fit_fraction_for_prediction(
+            prediction,
+            fit_config,
+        )
 
         observation_config = ObservationConfig()
         if fit_config.objective_mode == "image_balanced_extended":
             image_losses = []
             predicted_densities = {}
             for image_id, image_data in group.groupby("image", sort=True):
+                size_values_nm = image_data["size"].to_numpy(dtype=float)
+                if str(mode).strip().upper() == "DF":
+                    size_values_nm, _, _ = central_size_subset(
+                        size_values_nm,
+                        faulted_size_fraction,
+                    )
                 image_theta = theta_for_image_visibility(
                     theta,
                     series_id=series_id,
@@ -233,7 +290,7 @@ def total_objective(
                     return PENALTY
                 predicted_densities[str(image_id)] = predicted_density
                 log_intensity = predicted_loop_log_intensity(
-                    values_nm=image_data["size"].to_numpy(dtype=float),
+                    values_nm=size_values_nm,
                     mode=mode,
                     prediction=prediction,
                     theta=image_theta,
@@ -257,11 +314,16 @@ def total_objective(
             dataset_loss = float(np.mean(image_losses)) + count_loss
             if not np.isfinite(dataset_loss):
                 return PENALTY
-            total_loss += dataset_loss
+            total_loss += event_loss_weight * dataset_loss
             number_of_contributions += 1
 
         elif fit_config.objective_mode == "legacy":
             values_nm = group["size"].to_numpy(dtype=float)
+            if str(mode).strip().upper() == "DF":
+                values_nm, _, _ = central_size_subset(
+                    values_nm,
+                    faulted_size_fraction,
+                )
             logpdf = predicted_loop_logpdf(
                 values_nm=values_nm,
                 mode=mode,
@@ -275,9 +337,6 @@ def total_objective(
             dataset_loss = -float(np.mean(logpdf))
             if not np.isfinite(dataset_loss):
                 return PENALTY
-            total_loss += dataset_loss
-            number_of_contributions += 1
-
             observed_density, observed_std = image_number_density_statistics(
                 group["image"].to_numpy(),
                 group["volume_cm3"].to_numpy(dtype=float),
@@ -300,7 +359,9 @@ def total_objective(
             sigma_log = np.sqrt(np.log1p(relative_std**2))
             log_residual = np.log(predicted_density / observed_density)
             density_loss = 0.5 * (log_residual / sigma_log) ** 2
-            total_loss += fit_config.density_loss_weight * density_loss
+            dataset_loss += fit_config.density_loss_weight * density_loss
+            total_loss += event_loss_weight * dataset_loss
+            number_of_contributions += 1
         else:
             raise ValueError(
                 "fit_config.objective_mode must be "

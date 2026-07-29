@@ -49,6 +49,7 @@ from rtplus.simulation import simulate_all_series
 from rtplus.visibility_calibration import (
     calibrate_image_visibility,
     print_visibility_calibration,
+    refine_image_visibility_efficiencies,
 )
 
 
@@ -84,6 +85,34 @@ def parse_args():
         type=float,
         default=0.04,
         help="Minimum NB2 count overdispersion; 0.04 corresponds to 20%% image-level CV.",
+    )
+    p.add_argument(
+        "--faulted-size-fit-fraction",
+        type=float,
+        default=0.95,
+        help=(
+            "Central fraction of each DF image used by the Gaussian size "
+            "likelihood. Image counts still use all loops."
+        ),
+    )
+    p.add_argument(
+        "--full-df-temperatures",
+        nargs="*",
+        type=float,
+        default=[1100.0],
+        help=(
+            "Temperatures whose DF size likelihood retains the complete "
+            "distribution. Default: 1100."
+        ),
+    )
+    p.add_argument(
+        "--rt-initial-state-weight",
+        type=float,
+        default=3.0,
+        help=(
+            "Relative objective weight for the as-irradiated initial-state "
+            "observation."
+        ),
     )
     p.add_argument(
         "--faulted-distribution",
@@ -123,6 +152,17 @@ def parse_args():
         default=0.50,
         help="Maximum absolute image visibility offset in nm.",
     )
+    p.add_argument(
+        "--no-refine-visibility-efficiency",
+        action="store_true",
+        help="Skip the regularized model-assisted absolute efficiency refinement.",
+    )
+    p.add_argument(
+        "--visibility-efficiency-refinement-strength",
+        type=float,
+        default=0.75,
+        help="Geometric correction strength in [0, 1] for frozen image efficiencies.",
+    )
     p.add_argument("--debug-only", action="store_true", help="Run theta0 forward simulation and stop before fitting.")
     p.add_argument("--no-plot", action="store_true", help="Skip plots after fitting.")
     p.add_argument("--plot-dir", type=Path, default=PROJECT_ROOT / "Results", help="Directory for meeting-ready PNG plots.")
@@ -133,6 +173,16 @@ def main():
     args = parse_args()
     if args.count_overdispersion_floor <= 0.0:
         raise ValueError("--count-overdispersion-floor must be positive.")
+    if not 0.0 < args.faulted_size_fit_fraction <= 1.0:
+        raise ValueError(
+            "--faulted-size-fit-fraction must be in the interval (0, 1]."
+        )
+    if args.rt_initial_state_weight <= 0.0:
+        raise ValueError("--rt-initial-state-weight must be positive.")
+    if not 0.0 <= args.visibility_efficiency_refinement_strength <= 1.0:
+        raise ValueError(
+            "--visibility-efficiency-refinement-strength must be in [0, 1]."
+        )
     if min(
         args.df_rvis_nm,
         args.df_drvis_nm,
@@ -158,6 +208,11 @@ def main():
         maxiter=args.maxiter,
         objective_mode=args.objective_mode,
         count_overdispersion_floor=args.count_overdispersion_floor,
+        faulted_size_fit_fraction=args.faulted_size_fit_fraction,
+        faulted_full_distribution_temperatures=tuple(
+            args.full_df_temperatures
+        ),
+        room_temperature_loss_weight=args.rt_initial_state_weight,
         faulted_distribution=args.faulted_distribution,
         apply_smooth_visibility=not args.no_smooth_visibility,
         Rvis_DF_nm=args.df_rvis_nm,
@@ -177,6 +232,27 @@ def main():
     print_dataset_summary(loop_data)
     print_bf_df_density_consistency(loop_data)
     print(f"\nObjective mode: {fit_config.objective_mode}")
+    print(
+        "Faulted-loop size likelihood: central "
+        f"{100.0 * fit_config.faulted_size_fit_fraction:g}% per DF image "
+        "(all loops retained in count loss)"
+    )
+    print(
+        "Full DF size distributions retained at: "
+        + (
+            ", ".join(
+                f"{temperature:g} C"
+                for temperature in (
+                    fit_config.faulted_full_distribution_temperatures
+                )
+            )
+            or "none"
+        )
+    )
+    print(
+        "As-irradiated initial-state loss weight: "
+        f"{fit_config.room_temperature_loss_weight:g}"
+    )
 
     event_series = FIT_EVENT_SERIES
     if args.t_end is not None:
@@ -284,6 +360,59 @@ def main():
         specs,
     )
 
+    if (
+        fit_config.apply_smooth_visibility
+        and fit_config.image_specific_visibility
+        and not args.no_refine_visibility_efficiency
+    ):
+        preliminary_initial_states = fitted_initial_states(
+            best.theta,
+            material,
+            event_series,
+        )
+        preliminary_predictions = simulate_all_series(
+            event_series=event_series,
+            theta=best.theta,
+            material=material,
+            initial_states=preliminary_initial_states,
+        )
+        refined_efficiencies, refinement_diagnostics = (
+            refine_image_visibility_efficiencies(
+                loop_data,
+                theta=best.theta,
+                predictions=preliminary_predictions,
+                current_efficiencies=(
+                    fit_config.image_visibility_efficiency
+                ),
+                strength=args.visibility_efficiency_refinement_strength,
+            )
+        )
+        print("\nMODEL-ASSISTED IMAGE EFFICIENCY REFINEMENT")
+        print(
+            "  One regularized update is frozen before the final physical refit."
+        )
+        for diagnostic in refinement_diagnostics:
+            key = diagnostic["key"]
+            print(
+                f"  {key[0]} event={key[1]} {key[2]} {key[3]}: "
+                f"eta {diagnostic['old_efficiency']:.4f} -> "
+                f"{diagnostic['new_efficiency']:.4f}; "
+                f"Nobs/Npred="
+                f"{diagnostic['observed_density'] / diagnostic['predicted_density']:.3f}"
+            )
+        fit_config = replace(
+            fit_config,
+            image_visibility_efficiency=refined_efficiencies,
+        )
+        best, all_results = run_multistart(
+            loop_data,
+            material,
+            event_series,
+            parameter_temperatures,
+            fit_config,
+            specs,
+        )
+
     print("\nAll starts:")
     for r in all_results:
         print(f"  start={r.start_index}, success={r.success}, objective={r.objective:.6e}, message={r.message}")
@@ -372,6 +501,10 @@ def main():
             initial_states=best_initial_states,
             predictions=best_predictions["irradiated"],
             output_dir=args.plot_dir,
+            faulted_size_fit_fraction=fit_config.faulted_size_fit_fraction,
+            faulted_full_distribution_temperatures=(
+                fit_config.faulted_full_distribution_temperatures
+            ),
         )
 
 

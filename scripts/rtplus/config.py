@@ -95,6 +95,18 @@ class FitConfig:
     objective_mode: str = "image_balanced_extended"
     # NB2 alpha floor.  alpha=0.04 gives a 20% asymptotic count CV.
     count_overdispersion_floor: float = 0.04
+    # The faulted-loop family is deliberately Gaussian.  Fit its central
+    # population robustly so a small skewed tail cannot determine the Gaussian
+    # center and width.  Counts still use every observed loop.
+    faulted_size_fit_fraction: float = 0.95
+    # Events listed here retain the complete DF diameter distribution.  The
+    # 1100 C data are broad but not treated as outliers because their upper tail
+    # is part of the annealing response that the ODE must reproduce.
+    faulted_full_distribution_temperatures: Sequence[float] = (1100.0,)
+    # The as-irradiated observation defines the initial condition inherited by
+    # every annealing step.  Give that boundary-condition measurement extra
+    # weight without freezing it or fitting it in a separate stage.
+    room_temperature_loss_weight: float = 3.0
     # Positive size-distribution family used for faulted loops in both DF and
     # the faulted contribution to BF.
     faulted_distribution: str = "normal"
