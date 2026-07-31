@@ -8,6 +8,9 @@ from .observables import (
     binned_loop_number_density_from_images,
     predicted_loop_number_density_distribution,
     predicted_mean_diameters_nm,
+    predicted_observed_number_density,
+    predicted_visible_mean_diameters_nm,
+    theta_for_image_visibility,
 )
 from .simulation import simulate_all_series, simulate_all_temperatures
 from .physics import diffusion_coeff
@@ -46,6 +49,12 @@ def plot_model_vs_data(
         theta,
         radius_unit_to_nm,
     )
+    visible_Df_nm, visible_Dp_nm = predicted_visible_mean_diameters_nm(
+        mode,
+        prediction,
+        theta,
+        radius_unit_to_nm=radius_unit_to_nm,
+    )
 
     x_max = max(float(values_nm.max()) * 1.2, Df_nm * 1.5, Dp_nm * 1.5, 1.0)
     x = np.linspace(1e-9, x_max, 500)
@@ -75,9 +84,19 @@ def plot_model_vs_data(
         label="Experimental data",
     )
     plt.plot(x, model_density_nm4, linewidth=2.5, label="RT+ fitted distribution")
-    plt.axvline(Df_nm, linestyle="--", linewidth=1.5, label=f"Faulted diameter = {Df_nm:.2f} nm")
+    plt.axvline(
+        visible_Df_nm,
+        linestyle="--",
+        linewidth=1.5,
+        label=f"Visible faulted mean = {visible_Df_nm:.2f} nm",
+    )
     if str(mode).upper() == "BF":
-        plt.axvline(Dp_nm, linestyle=":", linewidth=1.5, label=f"Perfect diameter = {Dp_nm:.2f} nm")
+        plt.axvline(
+            visible_Dp_nm,
+            linestyle=":",
+            linewidth=1.5,
+            label=f"Visible perfect mean = {visible_Dp_nm:.2f} nm",
+        )
     plt.title(title)
     plt.xlabel("Loop diameter (nm)")
     plt.ylabel(_number_density_axis_label())
@@ -118,6 +137,8 @@ def plot_event_series_results(
     radius_unit_to_nm: float = 1e7,
     predictions=None,
     show: bool = True,
+    faulted_size_fit_fraction: float = 0.95,
+    faulted_full_distribution_temperatures=(1100.0,),
 ):
     """Plot fitted BF/DF distributions using common axes across events."""
     if predictions is None:
@@ -149,8 +170,11 @@ def plot_event_series_results(
             data_limit = float(np.quantile(mode_values, 0.995)) * 1.15
             model_means = []
             for event in ordered_events:
-                Df_nm, Dp_nm = predicted_mean_diameters_nm(
-                    predictions[series_id][event.event_order], theta, radius_unit_to_nm
+                Df_nm, Dp_nm = predicted_visible_mean_diameters_nm(
+                    mode,
+                    predictions[series_id][event.event_order],
+                    theta,
+                    radius_unit_to_nm=radius_unit_to_nm,
                 )
                 model_means.append(Df_nm)
                 if mode == "BF":
@@ -159,12 +183,6 @@ def plot_event_series_results(
 
         for row, event in enumerate(ordered_events):
             prediction = predictions[series_id][event.event_order]
-            Df_nm, Dp_nm = predicted_mean_diameters_nm(
-                prediction,
-                theta,
-                radius_unit_to_nm,
-            )
-
             for col, mode in enumerate(("DF", "BF")):
                 ax = axes[row, col]
                 group = loop_data[
@@ -182,13 +200,43 @@ def plot_event_series_results(
 
                 x_max = x_limits[mode]
                 x = np.linspace(max(1e-6, x_max / 5000), x_max, 500)
-                model_density_nm4 = CM3_TO_NM3 * predicted_loop_number_density_distribution(
-                    x,
-                    mode,
-                    prediction,
-                    theta,
-                    radius_unit_to_nm=radius_unit_to_nm,
+                image_model_densities = []
+                visible_faulted_means = []
+                visible_perfect_means = []
+                for image_id in sorted(group["image"].astype(str).unique()):
+                    image_theta = theta_for_image_visibility(
+                        theta,
+                        series_id=series_id,
+                        event_order=event.event_order,
+                        mode=mode,
+                        image_id=image_id,
+                    )
+                    image_model_densities.append(
+                        CM3_TO_NM3
+                        * predicted_loop_number_density_distribution(
+                            x,
+                            mode,
+                            prediction,
+                            image_theta,
+                            radius_unit_to_nm=radius_unit_to_nm,
+                        )
+                    )
+                    image_Df_nm, image_Dp_nm = (
+                        predicted_visible_mean_diameters_nm(
+                            mode,
+                            prediction,
+                            image_theta,
+                            radius_unit_to_nm=radius_unit_to_nm,
+                        )
+                    )
+                    visible_faulted_means.append(image_Df_nm)
+                    visible_perfect_means.append(image_Dp_nm)
+                model_density_nm4 = np.mean(
+                    np.vstack(image_model_densities),
+                    axis=0,
                 )
+                Df_nm = float(np.mean(visible_faulted_means))
+                Dp_nm = float(np.mean(visible_perfect_means))
 
                 bin_edges = np.linspace(0.0, x_max, bins + 1)
                 data_density = binned_loop_number_density_from_images(
@@ -205,12 +253,37 @@ def plot_event_series_results(
                     alpha=0.6,
                     edgecolor="#35586f",
                     color="#9ecae1",
-                    label=f"Data (n={len(values_nm)})",
+                    label=(
+                        "Data"
+                        if mode == "DF"
+                        else f"Data (n={len(values_nm)})"
+                    ),
                 )
-                ax.plot(x, model_density_nm4, linewidth=2.3, color="#ba0c2f", label="RT+ model")
-                ax.axvline(Df_nm, linestyle="--", linewidth=1.3, label=f"Faulted mean={Df_nm:.2f} nm")
+                ax.plot(
+                    x,
+                    model_density_nm4,
+                    linewidth=2.3,
+                    color="#ba0c2f",
+                    label=(
+                        "Visible model"
+                        if mode == "DF"
+                        else "Mean image-visible RT+ model"
+                    ),
+                )
+                ax.axvline(
+                    Df_nm,
+                    linestyle="--",
+                    linewidth=1.3,
+                    label="_nolegend_",
+                )
                 if mode == "BF":
-                    ax.axvline(Dp_nm, color="#7b2cbf", linestyle=":", linewidth=1.5, label=f"Perfect mean={Dp_nm:.2f} nm")
+                    ax.axvline(
+                        Dp_nm,
+                        color="#7b2cbf",
+                        linestyle=":",
+                        linewidth=1.5,
+                        label="_nolegend_",
+                    )
 
                 stage = "As-irradiated" if not event.simulate else f"{event.temperature_C:g} °C / {event.duration_s / 3600:g} h"
                 ax.set_title(f"{stage} — {mode}")
@@ -218,9 +291,26 @@ def plot_event_series_results(
                 ax.set_ylabel(_number_density_axis_label())
                 ax.set_xlim(0.0, x_max)
                 ax.grid(alpha=0.16)
-                ax.legend(fontsize="small")
+                ax.legend(
+                    title=(
+                        f"n={len(values_nm)}; Df,vis={Df_nm:.2f} nm"
+                        + (
+                            f"; Dp,vis={Dp_nm:.2f} nm"
+                            if mode == "BF"
+                            else ""
+                        )
+                    ),
+                    fontsize="small",
+                    title_fontsize="small",
+                )
 
-        fig.suptitle("Sequential loop-distribution fit on common diameter scales", fontsize=15)
+        fig.suptitle(
+            "Sequential loop-distribution fit on common diameter scales\n"
+            f"DF Gaussian size loss uses the lowest "
+            f"{100.0 * faulted_size_fit_fraction:g}% of each image; "
+            "selected events and every count use all loops",
+            fontsize=15,
+        )
         fig.tight_layout(rect=(0, 0, 1, 0.98))
         figures[series_id] = fig
 
@@ -300,8 +390,8 @@ def plot_experimental_images_per_temperature(
     Every TEM image is treated as an independent dataset.  Images belonging to
     the same observation mode and temperature use identical diameter bins and
     common axis limits.  By default, the shared bin width follows the
-    Freedman-Diaconis rule and the displayed range contains the central 95%
-    of the pooled observations.  Each spectrum is divided by its own sampled
+    Freedman-Diaconis rule and the displayed range extends to the pooled 95th
+    percentile. Each spectrum is divided by its own sampled
     image volume and by the bin width, producing units of nm^-4.
     """
 
@@ -404,33 +494,35 @@ def plot_experimental_images_per_temperature(
                     color=colors[mode],
                 )
                 mean_diameter = float(image_data["size"].mean())
-                number_above_range = int(
-                    np.count_nonzero(
-                        image_data["size"].to_numpy(dtype=float) > x_max
-                    )
-                )
                 axis.axvline(
                     mean_diameter,
                     color=colors[mode],
                     linestyle="--",
                     linewidth=1.4,
-                    label=f"Mean = {mean_diameter:.2f} nm",
+                    label="_nolegend_",
                 )
                 axis.set_title(f"{mode} - {image_id}")
                 axis.set_xlim(0.0, x_max)
                 axis.set_xlabel("Loop diameter (nm)")
                 axis.set_ylabel(_number_density_axis_label())
                 axis.grid(alpha=0.16)
-                axis.legend(
-                    title=(
-                        f"n = {len(image_data)}\n"
-                        f"V = {volume_nm3:.3e} nm³\n"
-                        f"ΔD = {selected_bin_width:.3g} nm\n"
-                        f"n above range = {number_above_range}"
+                axis.text(
+                    0.98,
+                    0.97,
+                    (
+                        f"n={len(image_data)}; mean={mean_diameter:.2f} nm; "
+                        f"ΔD={selected_bin_width:.3g} nm"
                     ),
-                    fontsize="small",
-                    title_fontsize="small",
-                    frameon=False,
+                    transform=axis.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize="x-small",
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.82,
+                        "pad": 2.0,
+                    },
                 )
 
             for column in range(len(image_ids_by_mode[mode]), n_columns):
@@ -479,7 +571,10 @@ def plot_model_vs_images_per_temperature(
     binning: str = "fd",
     bin_width_nm: float = 1.0,
     focus_quantile: float = 0.95,
+    faulted_size_fit_fraction: float = 0.95,
+    faulted_full_distribution_temperatures=(1100.0,),
     radius_unit_to_nm: float = 1e7,
+    show_diagnostics: bool = False,
 ):
     """Compare one event-level model prediction with every TEM image.
 
@@ -488,7 +583,9 @@ def plot_model_vs_images_per_temperature(
         density_j = n_j / (V_image * Delta_D)
 
     Images at the same event and imaging mode use common bins, x limits, and y
-    limits. The model is not rescaled to an individual image.
+    limits. The model is not rescaled to an individual image. Diagnostic
+    overlay for the underlying pre-visibility Gaussian is hidden by default to
+    keep meeting figures readable. Fitting limits are never drawn.
     """
 
     binning = str(binning).strip().lower()
@@ -498,6 +595,10 @@ def plot_model_vs_images_per_temperature(
         raise ValueError("bin_width_nm must be positive and finite.")
     if not 0.0 < focus_quantile <= 1.0:
         raise ValueError("focus_quantile must be in the interval (0, 1].")
+    if not 0.0 < faulted_size_fit_fraction <= 1.0:
+        raise ValueError(
+            "faulted_size_fit_fraction must be in the interval (0, 1]."
+        )
     if series_id not in event_series:
         raise KeyError(f"Unknown event series: {series_id!r}")
 
@@ -517,6 +618,15 @@ def plot_model_vs_images_per_temperature(
                 f"Missing model prediction for event {event.event_order}."
             )
         prediction = series_predictions[event.event_order]
+        use_full_faulted_distribution = any(
+            np.isclose(
+                float(event.temperature_C),
+                float(selected_temperature),
+                rtol=0.0,
+                atol=1.0e-9,
+            )
+            for selected_temperature in faulted_full_distribution_temperatures
+        )
         event_data = selected_series[
             selected_series["event_order"] == event.event_order
         ]
@@ -542,12 +652,6 @@ def plot_model_vs_images_per_temperature(
             n_columns,
             figsize=(4.7 * n_columns, 4.0 * len(available_modes)),
             squeeze=False,
-        )
-
-        Df_nm, Dp_nm = predicted_mean_diameters_nm(
-            prediction,
-            theta,
-            radius_unit_to_nm,
         )
 
         for row, mode in enumerate(available_modes):
@@ -585,22 +689,88 @@ def plot_model_vs_images_per_temperature(
                 selected_bin_width,
             )
             model_x = np.linspace(max(x_max / 5000.0, 1.0e-6), x_max, 700)
-            model_density_nm4 = (
-                CM3_TO_NM3
-                * predicted_loop_number_density_distribution(
-                    model_x,
-                    mode,
-                    prediction,
-                    theta,
-                    radius_unit_to_nm=radius_unit_to_nm,
-                )
-            )
-            row_maximum = float(np.max(model_density_nm4))
+            row_maximum = 0.0
 
             for column, image_id in enumerate(image_ids_by_mode[mode]):
                 axis = axes[row, column]
                 image_data = mode_data[mode_data["image"].astype(str) == image_id]
+                fit_upper_nm = np.inf
+                n_size_fit = len(image_data)
+                if (
+                    mode == "DF"
+                    and faulted_size_fit_fraction < 1.0
+                    and not use_full_faulted_distribution
+                ):
+                    fit_upper_nm = float(
+                        np.quantile(
+                            image_data["size"].to_numpy(dtype=float),
+                            faulted_size_fit_fraction,
+                        )
+                    )
+                    n_size_fit = int(
+                        np.count_nonzero(
+                            image_data["size"].to_numpy(dtype=float)
+                            <= fit_upper_nm
+                        )
+                    )
+                image_theta = theta_for_image_visibility(
+                    theta,
+                    series_id=series_id,
+                    event_order=event.event_order,
+                    mode=mode,
+                    image_id=image_id,
+                )
+                Df_nm, Dp_nm = predicted_visible_mean_diameters_nm(
+                    mode,
+                    prediction,
+                    image_theta,
+                    radius_unit_to_nm=radius_unit_to_nm,
+                )
+                model_density_nm4 = (
+                    CM3_TO_NM3
+                    * predicted_loop_number_density_distribution(
+                        model_x,
+                        mode,
+                        prediction,
+                        image_theta,
+                        radius_unit_to_nm=radius_unit_to_nm,
+                    )
+                )
+                predicted_visible_density_nm3 = (
+                    CM3_TO_NM3
+                    * predicted_observed_number_density(
+                        mode,
+                        prediction,
+                        image_theta,
+                        radius_unit_to_nm=radius_unit_to_nm,
+                    )
+                )
+                unfiltered_density_nm4 = None
+                if mode == "DF" and show_diagnostics:
+                    unfiltered_theta = dict(image_theta)
+                    unfiltered_theta.pop("Rvis_DF_nm", None)
+                    unfiltered_theta.pop("dRvis_DF_nm", None)
+                    unfiltered_density_nm4 = (
+                        CM3_TO_NM3
+                        * predicted_loop_number_density_distribution(
+                            model_x,
+                            mode,
+                            prediction,
+                            unfiltered_theta,
+                            radius_unit_to_nm=radius_unit_to_nm,
+                        )
+                    )
+                row_maximum = max(
+                    row_maximum,
+                    float(np.max(model_density_nm4)),
+                )
+                if show_diagnostics and unfiltered_density_nm4 is not None:
+                    row_maximum = max(
+                        row_maximum,
+                        float(np.max(unfiltered_density_nm4)),
+                    )
                 volume_nm3 = float(image_data["volume_nm3_effective"].iloc[0])
+                observed_density_nm3 = float(len(image_data)) / volume_nm3
                 density_nm4 = binned_loop_number_density_from_images(
                     image_data["size"].to_numpy(dtype=float),
                     image_data["image"].to_numpy(),
@@ -608,12 +778,6 @@ def plot_model_vs_images_per_temperature(
                     bin_edges,
                 )
                 row_maximum = max(row_maximum, float(np.max(density_nm4)))
-                number_above_range = int(
-                    np.count_nonzero(
-                        image_data["size"].to_numpy(dtype=float) > x_max
-                    )
-                )
-
                 axis.stairs(
                     density_nm4,
                     bin_edges,
@@ -621,21 +785,30 @@ def plot_model_vs_images_per_temperature(
                     alpha=0.55,
                     linewidth=1.5,
                     color=data_colors[mode],
-                    label="Experimental image",
+                    label="Data",
                 )
                 axis.plot(
                     model_x,
                     model_density_nm4,
                     color="#f26b21",
                     linewidth=2.3,
-                    label="RT+ model",
+                    label="Visible model",
                 )
+                if show_diagnostics and unfiltered_density_nm4 is not None:
+                    axis.plot(
+                        model_x,
+                        unfiltered_density_nm4,
+                        color="#6a737d",
+                        linewidth=1.3,
+                        linestyle=":",
+                        label="_nolegend_",
+                    )
                 axis.axvline(
                     Df_nm,
                     color=mean_colors["DF"],
                     linestyle="--",
                     linewidth=1.3,
-                    label=f"Faulted mean = {Df_nm:.2f} nm",
+                    label="_nolegend_",
                 )
                 if mode == "BF":
                     axis.axvline(
@@ -643,7 +816,7 @@ def plot_model_vs_images_per_temperature(
                         color="#7b2cbf",
                         linestyle=":",
                         linewidth=1.5,
-                        label=f"Perfect mean = {Dp_nm:.2f} nm",
+                        label="_nolegend_",
                     )
 
                 axis.set_title(f"{mode} - {image_id}")
@@ -652,15 +825,39 @@ def plot_model_vs_images_per_temperature(
                 axis.set_ylabel(_number_density_axis_label())
                 axis.grid(alpha=0.16)
                 axis.legend(
-                    title=(
-                        f"n = {len(image_data)}; "
-                        f"V = {volume_nm3:.3e} nm³\n"
-                        f"ΔD = {selected_bin_width:.3g} nm; "
-                        f"n above range = {number_above_range}"
-                    ),
                     fontsize="x-small",
-                    title_fontsize="x-small",
                     frameon=False,
+                    loc="upper left",
+                )
+                mean_summary = f"Df,vis={Df_nm:.2f} nm"
+                if mode == "BF":
+                    mean_summary += f"; Dp,vis={Dp_nm:.2f} nm"
+                size_fit_summary = (
+                    f"\nSize fit={n_size_fit}/{len(image_data)}"
+                    if n_size_fit < len(image_data)
+                    else ""
+                )
+                axis.text(
+                    0.98,
+                    0.97,
+                    (
+                        f"n={len(image_data)}; ΔD={selected_bin_width:.3g} nm\n"
+                        f"Rvis={image_theta[f'Rvis_{mode}_nm']:.3f} nm; "
+                        f"η={image_theta.get(f'visibility_efficiency_{mode}', 1.0):.3f}\n"
+                        f"Nobs={observed_density_nm3:.2e}; "
+                        f"Nmodel={predicted_visible_density_nm3:.2e} nm⁻³\n"
+                        f"{mean_summary}{size_fit_summary}"
+                    ),
+                    transform=axis.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize="x-small",
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.82,
+                        "pad": 2.0,
+                    },
                 )
 
             for column in range(len(image_ids_by_mode[mode]), n_columns):
@@ -689,7 +886,8 @@ def plot_model_vs_images_per_temperature(
             0.01,
             (
                 f"Common {binning.upper()} bins and {focus_text} within each "
-                "imaging-mode row; the model is not rescaled by image"
+                "imaging-mode row; physical state is shared and visibility "
+                "is image-specific"
             ),
             ha="center",
             fontsize=10,
@@ -738,6 +936,103 @@ def plot_arrhenius_diffusion(theta, material, event_series, series_id="irradiate
     return fig
 
 
+def plot_image_visibility_calibration(
+    theta,
+    event_series,
+    series_id="irradiated",
+):
+    """Show the frozen relative visibility thresholds used for each image."""
+
+    thresholds = theta.get("image_visibility_rvis_nm", {})
+    offsets = theta.get("image_visibility_offsets_nm", {})
+    efficiencies = theta.get("image_visibility_efficiency", {})
+    events = {
+        int(event.event_order): event
+        for event in event_series[series_id]
+    }
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(11.0, 4.3),
+        sharey=False,
+        constrained_layout=True,
+    )
+    for axis, mode in zip(axes, ("DF", "BF")):
+        base_rvis_nm = float(theta[f"Rvis_{mode}_nm"])
+        mode_items = sorted(
+            (key, value)
+            for key, value in thresholds.items()
+            if key[0] == series_id and key[2] == mode
+        )
+        event_orders = sorted({key[1] for key, _ in mode_items})
+        x_by_event = {
+            event_order: index
+            for index, event_order in enumerate(event_orders)
+        }
+        for key, radius_nm in mode_items:
+            _, event_order, _, image_id = key
+            same_event = [
+                item_key
+                for item_key, _ in mode_items
+                if item_key[1] == event_order
+            ]
+            image_rank = sorted(same_event).index(key)
+            if len(same_event) == 1:
+                jitter = 0.0
+            else:
+                jitter = np.linspace(
+                    -0.12,
+                    0.12,
+                    len(same_event),
+                )[image_rank]
+            x_value = x_by_event[event_order] + float(jitter)
+            axis.scatter(
+                x_value,
+                radius_nm,
+                s=55,
+                color="#ba0c2f" if mode == "BF" else "#1f77b4",
+                zorder=3,
+            )
+            axis.annotate(
+                f"{image_id.replace('Image ', '')}\n"
+                f"{offsets.get(key, 0.0):+.2f}; "
+                rf"$\eta$={efficiencies.get(key, 1.0):.2f}",
+                (x_value, radius_nm),
+                xytext=(0, 7),
+                textcoords="offset points",
+                ha="center",
+                fontsize=8,
+            )
+
+        axis.axhline(
+            base_rvis_nm,
+            color="#6a737d",
+            linewidth=1.4,
+            linestyle="--",
+            label=f"Mode base = {base_rvis_nm:.2f} nm",
+        )
+        tick_labels = []
+        for event_order in event_orders:
+            event = events[event_order]
+            tick_labels.append(
+                "As-irradiated"
+                if not event.simulate
+                else f"{event.temperature_C:g} °C"
+            )
+        axis.set_xticks(range(len(event_orders)), tick_labels)
+        axis.set_ylabel(r"50% visibility radius, $R_{\mathrm{vis},i}$ (nm)")
+        axis.set_title(f"{mode} image thresholds")
+        axis.grid(axis="y", alpha=0.20)
+        axis.legend(frameon=False)
+
+    fig.suptitle(
+        "Frozen image-specific TEM visibility calibration\n"
+        "labels show image ID, centered threshold offset (nm), and efficiency",
+        fontsize=14,
+    )
+    return fig
+
+
 def plot_meeting_results(
     loop_data,
     theta,
@@ -747,6 +1042,8 @@ def plot_meeting_results(
     predictions,
     output_dir,
     show=True,
+    faulted_size_fit_fraction: float = 0.95,
+    faulted_full_distribution_temperatures=(1100.0,),
 ):
     """Create, save, and optionally show the meeting-ready figures."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -759,20 +1056,34 @@ def plot_meeting_results(
         initial_states=initial_states,
         predictions={"irradiated": predictions},
         show=False,
+        faulted_size_fit_fraction=faulted_size_fit_fraction,
+        faulted_full_distribution_temperatures=(
+            faulted_full_distribution_temperatures
+        ),
     )
     arrhenius = plot_arrhenius_diffusion(theta, material, event_series)
+    visibility = plot_image_visibility_calibration(
+        theta,
+        event_series,
+        series_id="irradiated",
+    )
     per_image_fit_figures = plot_model_vs_images_per_temperature(
         loop_data=loop_data,
         theta=theta,
         event_series=event_series,
         predictions=predictions,
         series_id="irradiated",
+        faulted_size_fit_fraction=faulted_size_fit_fraction,
+        faulted_full_distribution_temperatures=(
+            faulted_full_distribution_temperatures
+        ),
     )
 
     paths = {
         "experimental_progression": output_dir / "01-experimental-distribution-progression.png",
         "model_fit_progression": output_dir / "02-model-fit-progression.png",
         "arrhenius_diffusion": output_dir / "03-arrhenius-interstitial-diffusion.png",
+        "image_visibility": output_dir / "04-image-visibility-calibration.png",
     }
     per_image_output_dir = output_dir / "per-image-model-fit"
     per_image_output_dir.mkdir(parents=True, exist_ok=True)
@@ -798,6 +1109,7 @@ def plot_meeting_results(
     progression.savefig(paths["experimental_progression"], dpi=300, bbox_inches="tight")
     fit_figures["irradiated"].savefig(paths["model_fit_progression"], dpi=300, bbox_inches="tight")
     arrhenius.savefig(paths["arrhenius_diffusion"], dpi=300, bbox_inches="tight")
+    visibility.savefig(paths["image_visibility"], dpi=300, bbox_inches="tight")
     print("\nSaved meeting plots:")
     for path in paths.values():
         print(f"  {path}")

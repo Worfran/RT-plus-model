@@ -57,8 +57,24 @@ KINETIC_PARAMETER_SPECS = (
     # temperature has another, allowing the distribution to broaden or narrow
     # as the specimen evolves. The same event-specific width is also used for
     # the faulted component of BF.
-    ParameterSpec("k_f_initial", scope="global", transform="log", initial=0.5, bounds=(0.10, 0.80)),
-    ParameterSpec("k_f", scope="per_temperature", transform="log", initial=0.5, bounds=(0.10, 0.80)),
+    # For the selected positive-centered Gaussian, k_f <= 1/3 keeps the latent
+    # Gaussian center at least three standard deviations above zero. Thus less
+    # than 0.14% of its probability is removed by positive truncation and the
+    # faulted distribution remains genuinely bell-shaped.
+    ParameterSpec(
+        "k_f_initial",
+        scope="global",
+        transform="log",
+        initial=0.25,
+        bounds=(0.05, 1.0 / 3.0),
+    ),
+    ParameterSpec(
+        "k_f",
+        scope="per_temperature",
+        transform="log",
+        initial=0.25,
+        bounds=(0.05, 1.0 / 3.0),
+    ),
     ParameterSpec("k_p", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
 )
 

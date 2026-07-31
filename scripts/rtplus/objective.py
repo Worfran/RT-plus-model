@@ -1,6 +1,8 @@
 """Objective function for fitting RT+ to BF/DF loop-size data."""
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import numpy as np
 import pandas as pd
 from scipy.special import gammaln, xlogy
@@ -14,8 +16,10 @@ from .config import (
 from .initial_conditions import fitted_initial_states
 from .observables import (
     image_number_density_statistics,
+    predicted_loop_log_intensity,
     predicted_loop_logpdf,
     predicted_observed_number_density,
+    theta_for_image_visibility,
 )
 from .parameters import unpack_theta
 from .simulation import simulate_all_temperatures
@@ -23,6 +27,44 @@ from .simulation import simulate_all_series
 
 
 PENALTY = 1e100
+
+
+def upper_trimmed_size_subset(values, retained_fraction=0.95):
+    """Remove only the largest empirical tail from the robust size loss.
+
+    This filtering applies only to the conditional diameter likelihood.  The
+    smallest measured loops and the image count/volume term are all retained.
+    """
+
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values) & (values > 0.0)]
+    retained_fraction = float(retained_fraction)
+    if not 0.0 < retained_fraction <= 1.0:
+        raise ValueError("retained_fraction must be in the interval (0, 1].")
+    if values.size == 0 or retained_fraction == 1.0:
+        return values, -np.inf, np.inf
+
+    upper = float(np.quantile(values, retained_fraction))
+    retained = values[values <= upper]
+    if retained.size == 0:
+        raise ValueError("Upper-tail size filtering removed every observation.")
+    return retained, -np.inf, upper
+
+
+def faulted_size_fit_fraction_for_prediction(prediction, fit_config):
+    """Return the DF size fraction selected for one experimental event."""
+
+    temperature_C = float(prediction["temperature_C"])
+    full_temperatures = {
+        float(value)
+        for value in fit_config.faulted_full_distribution_temperatures
+    }
+    if any(
+        np.isclose(temperature_C, selected, rtol=0.0, atol=1.0e-9)
+        for selected in full_temperatures
+    ):
+        return 1.0
+    return float(fit_config.faulted_size_fit_fraction)
 
 
 def _negative_binomial_logpmf(counts, means, overdispersion):
@@ -73,8 +115,29 @@ def image_count_deviance(
 
     counts = np.asarray(counts, dtype=float)
     volumes = np.asarray(volumes, dtype=float)
-    if counts.size == 0 or predicted_density <= 0.0:
-        raise ValueError("Image counts and predicted density must be positive.")
+    if counts.size == 0:
+        raise ValueError("Image counts must be positive.")
+
+    if isinstance(predicted_density, Mapping):
+        predicted_densities = np.asarray(
+            [
+                float(predicted_density[str(image_id)])
+                for image_id, _ in group.groupby("image", sort=True)
+            ],
+            dtype=float,
+        )
+    else:
+        predicted_densities = np.full(
+            counts.shape,
+            float(predicted_density),
+            dtype=float,
+        )
+    if (
+        predicted_densities.shape != counts.shape
+        or np.any(~np.isfinite(predicted_densities))
+        or np.any(predicted_densities <= 0.0)
+    ):
+        raise ValueError("Predicted image densities must be positive and finite.")
 
     image_densities = counts / volumes
     if counts.size > 1:
@@ -90,7 +153,7 @@ def image_count_deviance(
         empirical_overdispersion = 0.0
 
     alpha = max(float(overdispersion_floor), empirical_overdispersion)
-    predicted_counts = float(predicted_density) * volumes
+    predicted_counts = predicted_densities * volumes
     fitted_logpmf = _negative_binomial_logpmf(
         counts,
         predicted_counts,
@@ -123,6 +186,25 @@ def total_objective(
         parameter_temperatures,
         specs=parameter_specs,
     )
+    theta["faulted_distribution"] = fit_config.faulted_distribution
+    if fit_config.apply_smooth_visibility:
+        theta.update(
+            {
+                "Rvis_DF_nm": fit_config.Rvis_DF_nm,
+                "dRvis_DF_nm": fit_config.dRvis_DF_nm,
+                "Rvis_BF_nm": fit_config.Rvis_BF_nm,
+                "dRvis_BF_nm": fit_config.dRvis_BF_nm,
+                "image_visibility_rvis_nm": dict(
+                    fit_config.image_visibility_rvis_nm
+                ),
+                "image_visibility_offsets_nm": dict(
+                    fit_config.image_visibility_offsets_nm
+                ),
+                "image_visibility_efficiency": dict(
+                    fit_config.image_visibility_efficiency
+                ),
+            }
+        )
 
     initial_states = fitted_initial_states(theta, material, event_series)
 
@@ -165,36 +247,61 @@ def total_objective(
             return PENALTY
 
         prediction = predictions[series_id][event_order]
+        event_loss_weight = (
+            float(fit_config.room_temperature_loss_weight)
+            if prediction.get("metadata", {}).get("simulated") is False
+            else 1.0
+        )
+        faulted_size_fraction = faulted_size_fit_fraction_for_prediction(
+            prediction,
+            fit_config,
+        )
 
         observation_config = ObservationConfig()
         if fit_config.objective_mode == "image_balanced_extended":
             image_losses = []
-            for _, image_data in group.groupby("image", sort=True):
-                logpdf = predicted_loop_logpdf(
-                    values_nm=image_data["size"].to_numpy(dtype=float),
+            predicted_densities = {}
+            for image_id, image_data in group.groupby("image", sort=True):
+                size_values_nm = image_data["size"].to_numpy(dtype=float)
+                if str(mode).strip().upper() == "DF":
+                    size_values_nm, _, _ = upper_trimmed_size_subset(
+                        size_values_nm,
+                        faulted_size_fraction,
+                    )
+                image_theta = theta_for_image_visibility(
+                    theta,
+                    series_id=series_id,
+                    event_order=event_order,
+                    mode=mode,
+                    image_id=image_id,
+                )
+                predicted_density = predicted_observed_number_density(
                     mode=mode,
                     prediction=prediction,
-                    fit_theta=theta,
+                    theta=image_theta,
+                    observation_config=observation_config,
+                    radius_unit_to_nm=radius_unit_to_nm,
+                )
+                if predicted_density <= 0.0 or not np.isfinite(predicted_density):
+                    return PENALTY
+                predicted_densities[str(image_id)] = predicted_density
+                log_intensity = predicted_loop_log_intensity(
+                    values_nm=size_values_nm,
+                    mode=mode,
+                    prediction=prediction,
+                    theta=image_theta,
                     radius_unit_to_nm=radius_unit_to_nm,
                     observation_config=observation_config,
                 )
+                logpdf = log_intensity - np.log(predicted_density)
                 if len(logpdf) == 0 or not np.all(np.isfinite(logpdf)):
                     return PENALTY
                 image_losses.append(-float(np.mean(logpdf)))
 
-            predicted_density = predicted_observed_number_density(
-                mode=mode,
-                prediction=prediction,
-                theta=theta,
-                observation_config=observation_config,
-                radius_unit_to_nm=radius_unit_to_nm,
-            )
-            if predicted_density <= 0.0 or not np.isfinite(predicted_density):
-                return PENALTY
             try:
                 count_loss, _ = image_count_deviance(
                     group,
-                    predicted_density,
+                    predicted_densities,
                     fit_config.count_overdispersion_floor,
                 )
             except ValueError:
@@ -203,11 +310,16 @@ def total_objective(
             dataset_loss = float(np.mean(image_losses)) + count_loss
             if not np.isfinite(dataset_loss):
                 return PENALTY
-            total_loss += dataset_loss
+            total_loss += event_loss_weight * dataset_loss
             number_of_contributions += 1
 
         elif fit_config.objective_mode == "legacy":
             values_nm = group["size"].to_numpy(dtype=float)
+            if str(mode).strip().upper() == "DF":
+                values_nm, _, _ = upper_trimmed_size_subset(
+                    values_nm,
+                    faulted_size_fraction,
+                )
             logpdf = predicted_loop_logpdf(
                 values_nm=values_nm,
                 mode=mode,
@@ -221,9 +333,6 @@ def total_objective(
             dataset_loss = -float(np.mean(logpdf))
             if not np.isfinite(dataset_loss):
                 return PENALTY
-            total_loss += dataset_loss
-            number_of_contributions += 1
-
             observed_density, observed_std = image_number_density_statistics(
                 group["image"].to_numpy(),
                 group["volume_cm3"].to_numpy(dtype=float),
@@ -246,7 +355,9 @@ def total_objective(
             sigma_log = np.sqrt(np.log1p(relative_std**2))
             log_residual = np.log(predicted_density / observed_density)
             density_loss = 0.5 * (log_residual / sigma_log) ** 2
-            total_loss += fit_config.density_loss_weight * density_loss
+            dataset_loss += fit_config.density_loss_weight * density_loss
+            total_loss += event_loss_weight * dataset_loss
+            number_of_contributions += 1
         else:
             raise ValueError(
                 "fit_config.objective_mode must be "

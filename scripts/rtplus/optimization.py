@@ -45,6 +45,25 @@ def run_single_start(
     )
 
     theta = unpack_theta(result.x, parameter_temperatures, specs=parameter_specs)
+    theta["faulted_distribution"] = fit_config.faulted_distribution
+    if fit_config.apply_smooth_visibility:
+        theta.update(
+            {
+                "Rvis_DF_nm": fit_config.Rvis_DF_nm,
+                "dRvis_DF_nm": fit_config.dRvis_DF_nm,
+                "Rvis_BF_nm": fit_config.Rvis_BF_nm,
+                "dRvis_BF_nm": fit_config.dRvis_BF_nm,
+                "image_visibility_rvis_nm": dict(
+                    fit_config.image_visibility_rvis_nm
+                ),
+                "image_visibility_offsets_nm": dict(
+                    fit_config.image_visibility_offsets_nm
+                ),
+                "image_visibility_efficiency": dict(
+                    fit_config.image_visibility_efficiency
+                ),
+            }
+        )
     return FitResult(
         success=bool(result.success),
         message=str(result.message),
