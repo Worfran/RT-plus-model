@@ -1,0 +1,17 @@
+STEP 0: PRISTINE VERSUS IRRADIATED OBSERVABLE DATA
+
+The exchangeable unit is a complete TEM image, not an individual loop.
+Exact tests enumerate all image-label assignments while preserving group sizes.
+Density statistic: absolute log ratio of mean image loop densities.
+Shape statistic: image-balanced 1-Wasserstein diameter distance.
+Joint statistic: Euclidean combination of log-density difference and
+Wasserstein distance normalized by the pooled image-balanced median diameter.
+Benjamini-Hochberg q-values adjust the four matched temperature-mode tests.
+Interpretation threshold: alpha=0.05.
+
+These are raw observable comparisons. No fitted TEM visibility correction is
+applied, preventing a group-specific correction from removing the difference
+being tested. With only one or two pristine images per matched group, exact
+p-values are coarse and failure to reject does not demonstrate equivalence.
+Images from the same specimen may also be technical rather than biological
+replicates, so causal generalization requires independently prepared specimens.
