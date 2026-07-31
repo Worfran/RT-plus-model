@@ -95,9 +95,9 @@ class FitConfig:
     objective_mode: str = "image_balanced_extended"
     # NB2 alpha floor.  alpha=0.04 gives a 20% asymptotic count CV.
     count_overdispersion_floor: float = 0.04
-    # The faulted-loop family is deliberately Gaussian.  Fit its central
-    # population robustly so a small skewed tail cannot determine the Gaussian
-    # center and width.  Counts still use every observed loop.
+    # The faulted-loop family is deliberately Gaussian.  Retain the complete
+    # small-loop side and trim only the largest skewed tail from the size loss.
+    # Counts still use every observed loop.
     faulted_size_fit_fraction: float = 0.95
     # Events listed here retain the complete DF diameter distribution.  The
     # 1100 C data are broad but not treated as outliers because their upper tail

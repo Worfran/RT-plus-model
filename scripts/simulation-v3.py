@@ -91,8 +91,9 @@ def parse_args():
         type=float,
         default=0.95,
         help=(
-            "Central fraction of each DF image used by the Gaussian size "
-            "likelihood. Image counts still use all loops."
+            "Lowest fraction of each DF image used by the Gaussian size "
+            "likelihood; only the upper tail is trimmed. Image counts still "
+            "use all loops."
         ),
     )
     p.add_argument(
@@ -233,9 +234,9 @@ def main():
     print_bf_df_density_consistency(loop_data)
     print(f"\nObjective mode: {fit_config.objective_mode}")
     print(
-        "Faulted-loop size likelihood: central "
+        "Faulted-loop size likelihood: lowest "
         f"{100.0 * fit_config.faulted_size_fit_fraction:g}% per DF image "
-        "(all loops retained in count loss)"
+        "(upper tail trimmed from size loss only; all loops retained in counts)"
     )
     print(
         "Full DF size distributions retained at: "

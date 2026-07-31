@@ -29,11 +29,11 @@ from .simulation import simulate_all_series
 PENALTY = 1e100
 
 
-def central_size_subset(values, retained_fraction=0.95):
-    """Return the central empirical fraction used by the robust size loss.
+def upper_trimmed_size_subset(values, retained_fraction=0.95):
+    """Remove only the largest empirical tail from the robust size loss.
 
     This filtering applies only to the conditional diameter likelihood.  The
-    image count/volume term deliberately retains every measured loop.
+    smallest measured loops and the image count/volume term are all retained.
     """
 
     values = np.asarray(values, dtype=float)
@@ -44,15 +44,11 @@ def central_size_subset(values, retained_fraction=0.95):
     if values.size == 0 or retained_fraction == 1.0:
         return values, -np.inf, np.inf
 
-    tail_fraction = 0.5 * (1.0 - retained_fraction)
-    lower, upper = np.quantile(
-        values,
-        [tail_fraction, 1.0 - tail_fraction],
-    )
-    retained = values[(values >= lower) & (values <= upper)]
+    upper = float(np.quantile(values, retained_fraction))
+    retained = values[values <= upper]
     if retained.size == 0:
-        raise ValueError("Central size filtering removed every observation.")
-    return retained, float(lower), float(upper)
+        raise ValueError("Upper-tail size filtering removed every observation.")
+    return retained, -np.inf, upper
 
 
 def faulted_size_fit_fraction_for_prediction(prediction, fit_config):
@@ -268,7 +264,7 @@ def total_objective(
             for image_id, image_data in group.groupby("image", sort=True):
                 size_values_nm = image_data["size"].to_numpy(dtype=float)
                 if str(mode).strip().upper() == "DF":
-                    size_values_nm, _, _ = central_size_subset(
+                    size_values_nm, _, _ = upper_trimmed_size_subset(
                         size_values_nm,
                         faulted_size_fraction,
                     )
@@ -320,7 +316,7 @@ def total_objective(
         elif fit_config.objective_mode == "legacy":
             values_nm = group["size"].to_numpy(dtype=float)
             if str(mode).strip().upper() == "DF":
-                values_nm, _, _ = central_size_subset(
+                values_nm, _, _ = upper_trimmed_size_subset(
                     values_nm,
                     faulted_size_fraction,
                 )

@@ -16,10 +16,10 @@ from rtplus.config import DataConfig, EVENT_SERIES, FitConfig, MaterialConstants
 from rtplus.data_loader import load_all_loop_data
 from rtplus.initial_conditions import fitted_initial_state, fitted_initial_states
 from rtplus.objective import (
-    central_size_subset,
     faulted_size_fit_fraction_for_prediction,
     image_count_deviance,
     total_objective,
+    upper_trimmed_size_subset,
 )
 from rtplus.observables import (
     binned_loop_number_density,
@@ -89,13 +89,13 @@ class SimulationV3Tests(unittest.TestCase):
         )
         self.assertGreater(state[0], 1e10)
 
-    def test_central_size_subset_removes_only_symmetric_tails(self):
+    def test_upper_trimmed_size_subset_keeps_the_small_loop_tail(self):
         values = np.arange(1.0, 101.0)
-        retained, lower, upper = central_size_subset(values, 0.95)
-        self.assertAlmostEqual(lower, 3.475)
-        self.assertAlmostEqual(upper, 97.525)
-        np.testing.assert_array_equal(retained, np.arange(4.0, 98.0))
-        all_values, lower, upper = central_size_subset(values, 1.0)
+        retained, lower, upper = upper_trimmed_size_subset(values, 0.95)
+        self.assertEqual(lower, -np.inf)
+        self.assertAlmostEqual(upper, 95.05)
+        np.testing.assert_array_equal(retained, np.arange(1.0, 96.0))
+        all_values, lower, upper = upper_trimmed_size_subset(values, 1.0)
         np.testing.assert_array_equal(all_values, values)
         self.assertEqual(lower, -np.inf)
         self.assertEqual(upper, np.inf)
