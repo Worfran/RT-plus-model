@@ -6,11 +6,10 @@ from functools import lru_cache
 import numpy as np
 from scipy.optimize import brentq
 from scipy.special import log_ndtr, logsumexp
-from scipy.stats import lognorm, truncnorm
+from scipy.stats import lognorm, norm, truncnorm
 
 from .config import ObservationConfig
 from .parameters import faulted_width_at_temperature
-from .physics import lognormal_mean_radius_from_rms
 from .simulation import Prediction
 from .visibility_calibration import visibility_image_key
 
@@ -26,13 +25,10 @@ def effective_bf_faulted_visibility(
     theta: dict,
     observation_config: ObservationConfig | None = None,
 ) -> float:
-    """Return crystallographic visibility times BF detection efficiency."""
+    """Return the fixed crystallographic BF visibility of faulted loops."""
 
     cfg = observation_config or ObservationConfig()
-    eta_bf_f = float(theta.get("eta_bf_f", 1.0))
-    if not 0.0 < eta_bf_f <= 1.0:
-        raise ValueError("eta_bf_f must be in the interval (0, 1].")
-    return float(cfg.bf_faulted_visibility * eta_bf_f)
+    return float(cfg.bf_faulted_visibility)
 
 
 def lognormal_shape_from_mean_std(mean: float, std: float) -> float:
@@ -63,14 +59,25 @@ def lognormal_survival_from_mean_and_k(cutoff, mean: float, k: float) -> float:
     return float(lognorm.sf(float(cutoff), s=sigma_logn, scale=np.exp(mu_logn)))
 
 
-def faulted_distribution_family(theta: dict) -> str:
-    """Return and validate the selected positive faulted-loop family."""
+def faulted_distribution_family(theta: dict, mode: str | None = None) -> str:
+    """Return the selected faulted-loop observation family for one mode."""
 
-    family = str(theta.get("faulted_distribution", "lognormal")).strip().lower()
-    if family not in {"normal", "lognormal", "truncated_normal"}:
+    family_by_mode = theta.get("faulted_distribution_by_mode", {})
+    normalized_mode = None if mode is None else str(mode).strip().upper()
+    if normalized_mode in family_by_mode:
+        family = str(family_by_mode[normalized_mode]).strip().lower()
+    else:
+        family = str(theta.get("faulted_distribution", "lognormal")).strip().lower()
+    valid = {
+        "normal",
+        "lognormal",
+        "truncated_normal",
+        "zero_truncated_normal",
+    }
+    if family not in valid:
         raise ValueError(
-            "faulted_distribution must be 'normal', 'lognormal', or "
-            "'truncated_normal'."
+            "Faulted distribution must be normal, lognormal, "
+            "truncated_normal, or zero_truncated_normal."
         )
     return family
 
@@ -137,19 +144,19 @@ def positive_centered_normal_parameters(
     center: float,
     k: float,
 ) -> tuple[float, float, float]:
-    """Return a Gaussian centered at ``center`` and truncated only at zero.
+    """Return paper-style Gaussian parameters and its standardized zero point.
 
-    ``k`` is the latent Gaussian sigma/center ratio. The fitted bounds enforce
-    k <= 1/3, so positive truncation removes at most 0.14% probability and the
-    resulting distribution remains visually and statistically bell-shaped.
+    ``k = omega / center`` is the width ratio used by Bawane et al.  The
+    Gaussian itself is *not* renormalized at zero: the published visibility
+    moments integrate the ordinary Gaussian only over detectable positive
+    radii.  The third return value is retained for diagnostics and backwards
+    compatibility with callers that need the standardized zero location.
     """
 
     center = max(float(center), 1.0e-30)
     k = float(k)
-    if not 0.0 < k <= 1.0 / 3.0 + 1.0e-12:
-        raise ValueError(
-            "A positive-centered normal requires 0 < sigma/center <= 1/3."
-        )
+    if not np.isfinite(k) or k <= 0.0:
+        raise ValueError("A centered normal requires a positive width ratio.")
     scale = k * center
     lower_standardized = -center / scale
     return center, scale, lower_standardized
@@ -161,12 +168,16 @@ def loop_size_logpdf(
     k: float,
     family: str,
 ) -> np.ndarray:
-    """Evaluate a positive loop-size family with a specified mean and CV."""
+    """Evaluate a loop-size family using the selected observation convention."""
 
     family = str(family).strip().lower()
     if family == "lognormal":
         return lognormal_logpdf_from_mean_and_k(values, mean, k)
     if family == "normal":
+        location, scale, _ = positive_centered_normal_parameters(mean, k)
+        logpdf = norm.logpdf(values, loc=location, scale=scale)
+        return np.where(np.asarray(values, dtype=float) > 0.0, logpdf, -np.inf)
+    if family == "zero_truncated_normal":
         location, scale, lower = positive_centered_normal_parameters(mean, k)
         return truncnorm.logpdf(
             values,
@@ -204,6 +215,13 @@ def _loop_size_quantiles(
             scale=np.exp(mu_logn),
         )
     if family == "normal":
+        location, scale, _ = positive_centered_normal_parameters(mean, k)
+        return norm.ppf(
+            _VISIBILITY_QUANTILES,
+            loc=location,
+            scale=scale,
+        )
+    if family == "zero_truncated_normal":
         location, scale, lower = positive_centered_normal_parameters(mean, k)
         return truncnorm.ppf(
             _VISIBILITY_QUANTILES,
@@ -225,6 +243,30 @@ def _loop_size_quantiles(
             scale=scale,
         )
     raise ValueError(f"Unknown loop-size distribution family: {family!r}")
+
+
+def _positive_loop_size_quadrature(
+    mean: float,
+    k: float,
+    family: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return positive-size nodes and unconditional probability weights."""
+
+    if family != "normal":
+        return (
+            _loop_size_quantiles(mean, k, family),
+            _VISIBILITY_QUADRATURE_WEIGHTS,
+        )
+
+    location, scale, _ = positive_centered_normal_parameters(mean, k)
+    positive_fraction = float(norm.sf(0.0, loc=location, scale=scale))
+    lower_quantile = 1.0 - positive_fraction
+    quantiles = lower_quantile + positive_fraction * _VISIBILITY_QUANTILES
+    diameters_nm = norm.ppf(quantiles, loc=location, scale=scale)
+    return (
+        diameters_nm,
+        positive_fraction * _VISIBILITY_QUADRATURE_WEIGHTS,
+    )
 
 
 def visibility_parameters_for_mode(
@@ -259,7 +301,7 @@ def theta_for_image_visibility(
     mode,
     image_id,
 ) -> dict:
-    """Return a shallow theta copy with one calibrated image threshold active."""
+    """Return a theta copy with one image's threshold and width active."""
 
     image_thresholds = theta.get("image_visibility_rvis_nm", {})
     if not image_thresholds:
@@ -275,10 +317,9 @@ def theta_for_image_visibility(
     mode = str(mode).strip().upper()
     local_theta = dict(theta)
     local_theta[f"Rvis_{mode}_nm"] = float(image_thresholds[key])
-    image_efficiencies = theta.get("image_visibility_efficiency", {})
-    local_theta[f"visibility_efficiency_{mode}"] = float(
-        image_efficiencies.get(key, 1.0)
-    )
+    image_widths = theta.get("image_visibility_drvis_nm", {})
+    if key in image_widths:
+        local_theta[f"dRvis_{mode}_nm"] = float(image_widths[key])
     return local_theta
 
 
@@ -288,16 +329,12 @@ def visibility_log_weight(values_nm, mode: str, theta: dict) -> np.ndarray:
     values_nm = np.asarray(values_nm, dtype=float)
     parameters = visibility_parameters_for_mode(mode, theta)
     if parameters is None:
-        return np.zeros_like(values_nm, dtype=float)
+        return np.where(values_nm > 0.0, 0.0, -np.inf)
     visibility_radius_nm, transition_radius_nm = parameters
-    efficiency = float(
-        theta.get(f"visibility_efficiency_{str(mode).strip().upper()}", 1.0)
-    )
-    if not 0.0 < efficiency <= 1.0:
-        raise ValueError("Image visibility efficiency must be in (0, 1].")
     radii_nm = 0.5 * values_nm
     z = (radii_nm - visibility_radius_nm) / transition_radius_nm
-    return np.log(efficiency) - np.logaddexp(0.0, -z)
+    log_weight = -np.logaddexp(0.0, -z)
+    return np.where(values_nm > 0.0, log_weight, -np.inf)
 
 
 def visible_fraction_of_distribution(
@@ -308,10 +345,19 @@ def visible_fraction_of_distribution(
     theta: dict,
     hard_cutoff_diameter_nm: float | None = None,
 ) -> float:
-    """Return ``<w(R)>`` for one positive loop-size distribution."""
+    """Return the observable fraction of one loop-size distribution."""
 
     parameters = visibility_parameters_for_mode(mode, theta)
-    if parameters is None and hard_cutoff_diameter_nm is None:
+    if (
+        parameters is None
+        and hard_cutoff_diameter_nm is None
+    ):
+        if family == "normal":
+            location, scale, _ = positive_centered_normal_parameters(
+                mean_diameter_nm,
+                k,
+            )
+            return float(norm.sf(0.0, loc=location, scale=scale))
         return 1.0
     if parameters is None and hard_cutoff_diameter_nm is not None:
         cutoff = float(hard_cutoff_diameter_nm)
@@ -348,21 +394,19 @@ def visible_fraction_of_distribution(
                 )
             )
         if family == "normal":
-            location, scale, lower = positive_centered_normal_parameters(
+            location, scale, _ = positive_centered_normal_parameters(
                 mean_diameter_nm,
                 k,
             )
             return float(
-                truncnorm.sf(
+                norm.sf(
                     cutoff,
-                    a=lower,
-                    b=np.inf,
                     loc=location,
                     scale=scale,
                 )
             )
 
-    diameters_nm = _loop_size_quantiles(
+    diameters_nm, quadrature_weights = _positive_loop_size_quadrature(
         max(float(mean_diameter_nm), 1.0e-30),
         max(float(k), 1.0e-8),
         family,
@@ -375,7 +419,7 @@ def visible_fraction_of_distribution(
             0.0,
         )
     fraction = float(
-        np.sum(_VISIBILITY_QUADRATURE_WEIGHTS * weights)
+        np.sum(quadrature_weights * weights)
     )
     return float(np.clip(fraction, 0.0, 1.0))
 
@@ -388,13 +432,26 @@ def visible_mean_diameter_of_distribution(
     theta: dict,
     hard_cutoff_diameter_nm: float | None = None,
 ) -> float:
-    """Return ``<D w(D)>/<w(D)>`` for one loop-size distribution."""
+    """Return ``<D w(D)>/<w(D)>`` over observable positive diameters."""
 
     parameters = visibility_parameters_for_mode(mode, theta)
-    if parameters is None and hard_cutoff_diameter_nm is None:
+    if (
+        parameters is None
+        and hard_cutoff_diameter_nm is None
+    ):
+        if family == "normal":
+            location, scale, _ = positive_centered_normal_parameters(
+                mean_diameter_nm,
+                k,
+            )
+            alpha = -location / scale
+            positive_fraction = norm.sf(alpha)
+            return float(
+                location + scale * norm.pdf(alpha) / positive_fraction
+            )
         return float(mean_diameter_nm)
 
-    diameters_nm = _loop_size_quantiles(
+    diameters_nm, quadrature_weights = _positive_loop_size_quadrature(
         max(float(mean_diameter_nm), 1.0e-30),
         max(float(k), 1.0e-8),
         family,
@@ -407,13 +464,13 @@ def visible_mean_diameter_of_distribution(
             0.0,
         )
     denominator = float(
-        np.sum(_VISIBILITY_QUADRATURE_WEIGHTS * weights)
+        np.sum(quadrature_weights * weights)
     )
     if denominator <= 0.0:
         return np.nan
     numerator = float(
         np.sum(
-            _VISIBILITY_QUADRATURE_WEIGHTS
+            quadrature_weights
             * diameters_nm
             * weights
         )
@@ -441,15 +498,14 @@ def predicted_mean_radii_nm(
     theta: dict,
     radius_unit_to_nm: float = 1e7,
 ) -> tuple[float, float]:
-    """Return arithmetic-mean radii consistent with stored second moments."""
+    """Return the source RT+ representative radii used as distribution means."""
     if isinstance(prediction, dict):
-        Rf_rms, Rp_rms = prediction["Rf"], prediction["Rp"]
+        Rf, Rp = prediction["Rf"], prediction["Rp"]
     else:
-        Rf_rms, Rp_rms = prediction.Rf, prediction.Rp
-    k_f = faulted_width_for_prediction(prediction, theta)
+        Rf, Rp = prediction.Rf, prediction.Rp
     return (
-        lognormal_mean_radius_from_rms(Rf_rms, k_f) * radius_unit_to_nm,
-        lognormal_mean_radius_from_rms(Rp_rms, theta["k_p"]) * radius_unit_to_nm,
+        float(Rf) * radius_unit_to_nm,
+        float(Rp) * radius_unit_to_nm,
     )
 
 
@@ -481,7 +537,7 @@ def predicted_visible_mean_diameters_nm(
         radius_unit_to_nm,
     )
     k_f = faulted_width_for_prediction(prediction, theta)
-    family_f = faulted_distribution_family(theta)
+    family_f = faulted_distribution_family(theta, mode)
     hard_cutoff_diameter_nm = None
     if cfg.apply_resolution_cutoff:
         hard_cutoff_diameter_nm = 2.0 * (
@@ -506,6 +562,84 @@ def predicted_visible_mean_diameters_nm(
         hard_cutoff_diameter_nm,
     )
     return visible_Df_nm, visible_Dp_nm
+
+
+def predicted_observed_mean_diameter_nm(
+    mode: str,
+    prediction,
+    theta: dict,
+    observation_config: ObservationConfig | None = None,
+    radius_unit_to_nm: float = 1e7,
+) -> float:
+    """Return the mean diameter of the complete observable DF/BF population."""
+
+    cfg = observation_config or ObservationConfig()
+    mode = str(mode).strip().upper()
+    Df_nm, Dp_nm = predicted_mean_diameters_nm(
+        prediction,
+        theta,
+        radius_unit_to_nm,
+    )
+    k_f = faulted_width_for_prediction(prediction, theta)
+    family_f = faulted_distribution_family(theta, mode)
+    hard_cutoff_diameter_nm = None
+    if cfg.apply_resolution_cutoff:
+        hard_cutoff_diameter_nm = 2.0 * (
+            cfg.relrod_resolution_radius_nm
+            if mode == "DF"
+            else cfg.bf_resolution_radius_nm
+        )
+
+    visible_Df_nm = visible_mean_diameter_of_distribution(
+        Df_nm,
+        k_f,
+        family_f,
+        mode,
+        theta,
+        hard_cutoff_diameter_nm,
+    )
+    fraction_f = visible_fraction_of_distribution(
+        Df_nm,
+        k_f,
+        family_f,
+        mode,
+        theta,
+        hard_cutoff_diameter_nm,
+    )
+    if mode == "DF":
+        return float(visible_Df_nm)
+    if mode != "BF":
+        raise ValueError(f"Unknown mode: {mode}")
+
+    visible_Dp_nm = visible_mean_diameter_of_distribution(
+        Dp_nm,
+        theta["k_p"],
+        "lognormal",
+        mode,
+        theta,
+        hard_cutoff_diameter_nm,
+    )
+    fraction_p = visible_fraction_of_distribution(
+        Dp_nm,
+        theta["k_p"],
+        "lognormal",
+        mode,
+        theta,
+        hard_cutoff_diameter_nm,
+    )
+    if isinstance(prediction, dict):
+        Cf, Cp = float(prediction["Cf"]), float(prediction["Cp"])
+    else:
+        Cf, Cp = float(prediction.Cf), float(prediction.Cp)
+    weight_f = effective_bf_faulted_visibility(theta, cfg) * Cf * fraction_f
+    weight_p = cfg.bf_perfect_visibility * Cp * fraction_p
+    denominator = weight_f + weight_p
+    if denominator <= 0.0:
+        return np.nan
+    return float(
+        (weight_f * visible_Df_nm + weight_p * visible_Dp_nm)
+        / denominator
+    )
 
 
 def predicted_observed_number_density(
@@ -533,7 +667,7 @@ def predicted_observed_number_density(
 
     Rf_nm, Rp_nm = predicted_mean_radii_nm(prediction, theta, radius_unit_to_nm)
     k_f = faulted_width_for_prediction(prediction, theta)
-    family_f = faulted_distribution_family(theta)
+    family_f = faulted_distribution_family(theta, mode)
     hard_cutoff_diameter_nm = None
 
     if mode == "DF":
@@ -613,7 +747,7 @@ def predicted_loop_log_intensity(
 
     k_f = faulted_width_for_prediction(prediction, theta)
     k_p = theta["k_p"]
-    family_f = faulted_distribution_family(theta)
+    family_f = faulted_distribution_family(theta, mode)
 
     Df_nm, Dp_nm = predicted_mean_diameters_nm(
         prediction,

@@ -1,0 +1,26 @@
+Section,Parameter,Meaning,Value,Units,Status
+fit,objective,Final objective,21.017517206067758,-,derived
+model,faulted_distribution_DF,DF faulted-loop observation distribution,zero_truncated_normal,-,selected
+model,faulted_distribution_BF,BF faulted-loop observation distribution,zero_truncated_normal,-,selected
+model,perfect_distribution_BF,BF perfect-loop observation distribution,lognormal,-,fixed
+model,D0,Interstitial diffusion prefactor,0.01,cm^2/s,fixed
+model,Em,Interstitial migration energy,3.0211336070869668,eV,fitted
+model,P0,Perfect-loop coalescence prefactor,1.4635385945430142e-16,cm^3/s,fitted
+model,Ea,Perfect-loop coalescence barrier,0.9157389441535608,eV,fitted
+model,P0_f,Faulted-loop coalescence prefactor,2.0425199582022377e-18,cm^3/s,fitted
+model,Ea_f,Faulted-loop coalescence barrier,0.7628051180706059,eV,fitted
+model,k_f_initial,Shared faulted width ratio for the DF/BF observation families,0.7863678347313832,-,fitted
+model,k_p,Perfect-loop distribution std/mean,0.7327105322080183,-,fitted
+model,Ci0,Initial mobile-interstitial density,1.9455884145392896e+18,cm^-3,fitted
+model,Cf0,Initial faulted-loop density,2.748326481304188e+17,cm^-3,fitted
+model,Cp0,Initial perfect-loop density,1.4709573964326554e+17,cm^-3,fitted
+model,Rf0_nm,Initial faulted representative radius,0.35174548791581794,nm,fitted
+model,Rp0_nm,Initial perfect representative radius,1.8390720820889457,nm,fitted
+visibility base,Rvis_DF_nm,DF base 50% visibility radius,0.5,nm,fixed anchor
+visibility base,dRvis_DF_nm,DF base visibility transition width,0.15,nm,fixed anchor
+visibility base,Rvis_BF_nm,BF base 50% visibility radius,1.0,nm,fixed anchor
+visibility base,dRvis_BF_nm,BF base visibility transition width,0.25,nm,fixed anchor
+event,k_f_900C,Shared faulted width ratio at 900 C,1.5,-,fitted
+event,k_f_1100C,Shared faulted width ratio at 1100 C,1.5,-,fitted
+event,Puf_900C,Faulted-to-perfect conversion rate at 900 C,1.010181133135186e-09,1/s,fitted
+event,Puf_1100C,Faulted-to-perfect conversion rate at 1100 C,9.058245684530846e-07,1/s,fitted

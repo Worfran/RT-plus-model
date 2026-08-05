@@ -14,10 +14,8 @@ import pandas as pd
 from .config import MaterialConstants
 from .physics import (
     compute_radius,
-    lognormal_rms_radius_from_mean,
     loop_content_from_radius,
 )
-from .parameters import faulted_width_at_temperature
 
 
 def loguniform(low: float, high: float, rng: np.random.Generator) -> float:
@@ -132,8 +130,8 @@ def describe_y0(y0: np.ndarray, material: MaterialConstants) -> str:
         f"  Np = {Np:.3e}\n"
         f"  Cf = {Cf:.3e} cm^-3\n"
         f"  Cp = {Cp:.3e} cm^-3\n"
-        f"  Rf_rms = {Rf*1e7:.3f} nm\n"
-        f"  Rp_rms = {Rp*1e7:.3f} nm"
+        f"  Rf = {Rf*1e7:.3f} nm\n"
+        f"  Rp = {Rp*1e7:.3f} nm"
     )
 
 def make_series_initial_state(
@@ -167,9 +165,10 @@ def fitted_initial_state(theta: dict, material: MaterialConstants) -> np.ndarray
     """Construct a nonredundant fitted state in physical units.
 
     Ci0, Cv0, Cf0 and Cp0 are number concentrations in cm^-3.  The two
-    stored-interstitial concentrations are derived from fitted arithmetic-mean
-    radii, fitted distribution widths, and loop number densities.  This makes
-    N proportional to the physical second moment C*<R^2>.
+    stored-interstitial concentrations are derived from the fitted RT+
+    representative radii and loop number densities.  The observation widths
+    do not alter the ODE state: in the source model the same representative
+    radius is used as the center of the postulated loop-size distribution.
     """
 
     required = ("Ci0", "Cf0", "Cp0", "Rf0_nm", "Rp0_nm")
@@ -188,16 +187,13 @@ def fitted_initial_state(theta: dict, material: MaterialConstants) -> np.ndarray
         raise ValueError("Fitted initial conditions must be nonnegative.")
 
     Nf0 = loop_content_from_radius(
-        lognormal_rms_radius_from_mean(
-            Rf0,
-            faulted_width_at_temperature(theta),
-        ),
+        Rf0,
         Cf0,
         material.b,
         material.Omega0,
     )
     Np0 = loop_content_from_radius(
-        lognormal_rms_radius_from_mean(Rp0, theta["k_p"]),
+        Rp0,
         Cp0,
         material.b,
         material.Omega0,

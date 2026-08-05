@@ -22,8 +22,8 @@ def print_bf_df_density_consistency(loop_data, series_id="irradiated"):
         C_BF = v_BF,f Cf + v_BF,p Cp.
 
     Since Cp cannot be negative, the faulted contribution inferred from DF is
-    a lower bound on BF when eta_BF,f is one.  Violations quantify how much
-    additional BF faulted-loop detection efficiency is needed.
+    a lower bound on BF before size-dependent visibility is applied. Violations
+    flag datasets that the fixed crystallographic factors alone cannot match.
     """
 
     cfg = ObservationConfig()
@@ -31,7 +31,7 @@ def print_bf_df_density_consistency(loop_data, series_id="irradiated"):
         return
 
     selected = loop_data[loop_data["series_id"] == series_id]
-    print("\nBF/DF observable-density consistency check at eta_BF,f = 1:")
+    print("\nBF/DF raw-density consistency check:")
     for event_order in sorted(selected["event_order"].unique()):
         densities = {}
         for mode in ("DF", "BF"):
@@ -56,12 +56,10 @@ def print_bf_df_density_consistency(loop_data, series_id="irradiated"):
         )
         ratio = minimum_bf_density / densities["BF"]
         status = "compatible" if ratio <= 1.0 else "INCOMPATIBLE"
-        maximum_eta_if_no_perfect = min(1.0, 1.0 / ratio)
         print(
             f"  event={int(event_order)}: minimum BF from DF = "
             f"{minimum_bf_density:.3e}, measured BF = {densities['BF']:.3e}, "
-            f"ratio={ratio:.2f} ({status}), "
-            f"eta_BF,f must be <={maximum_eta_if_no_perfect:.3f} if Cp=0"
+            f"ratio={ratio:.2f} ({status})"
         )
 
 

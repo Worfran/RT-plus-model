@@ -1,6 +1,9 @@
 """Console reporting for fitted RT+ parameters and derived event values."""
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+
 import numpy as np
 
 from .config import ObservationConfig
@@ -36,6 +39,170 @@ def _print_table(headers, rows) -> None:
         print("  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)))
 
 
+def write_fit_result_tables(
+    output_dir,
+    theta,
+    material,
+    predictions,
+    objective=None,
+) -> dict[str, Path]:
+    """Save fitted physical and per-image visibility parameters as CSV tables."""
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    parameter_path = output_dir / "fitted-model-parameters.csv"
+    visibility_path = output_dir / "image-visibility-parameters.csv"
+
+    parameter_rows = []
+
+    def add_parameter(section, parameter, meaning, value, units, status):
+        parameter_rows.append(
+            {
+                "Section": section,
+                "Parameter": parameter,
+                "Meaning": meaning,
+                "Value": value,
+                "Units": units,
+                "Status": status,
+            }
+        )
+
+    if objective is not None:
+        add_parameter("fit", "objective", "Final objective", objective, "-", "derived")
+    add_parameter(
+        "model",
+        "faulted_distribution_DF",
+        "DF faulted-loop observation distribution",
+        faulted_distribution_family(theta, "DF"),
+        "-",
+        "selected",
+    )
+    add_parameter(
+        "model",
+        "faulted_distribution_BF",
+        "BF faulted-loop observation distribution",
+        faulted_distribution_family(theta, "BF"),
+        "-",
+        "selected",
+    )
+    add_parameter(
+        "model",
+        "perfect_distribution_BF",
+        "BF perfect-loop observation distribution",
+        "lognormal",
+        "-",
+        "fixed",
+    )
+    for parameter, meaning, value, units, status in (
+        ("D0", "Interstitial diffusion prefactor", material.D0, "cm^2/s", "fixed"),
+        ("Em", "Interstitial migration energy", theta["Em"], "eV", "fitted"),
+        ("P0", "Perfect-loop coalescence prefactor", theta["P0"], "cm^3/s", "fitted"),
+        ("Ea", "Perfect-loop coalescence barrier", theta["Ea"], "eV", "fitted"),
+        ("P0_f", "Faulted-loop coalescence prefactor", theta["P0_f"], "cm^3/s", "fitted"),
+        ("Ea_f", "Faulted-loop coalescence barrier", theta["Ea_f"], "eV", "fitted"),
+        (
+            "k_f_initial",
+            "Shared faulted width ratio for the DF/BF observation families",
+            faulted_width_at_temperature(theta),
+            "-",
+            "fitted",
+        ),
+        ("k_p", "Perfect-loop distribution std/mean", theta["k_p"], "-", "fitted"),
+        ("Ci0", "Initial mobile-interstitial density", theta["Ci0"], "cm^-3", "fitted"),
+        ("Cf0", "Initial faulted-loop density", theta["Cf0"], "cm^-3", "fitted"),
+        ("Cp0", "Initial perfect-loop density", theta["Cp0"], "cm^-3", "fitted"),
+        ("Rf0_nm", "Initial faulted representative radius", theta["Rf0_nm"], "nm", "fitted"),
+        ("Rp0_nm", "Initial perfect representative radius", theta["Rp0_nm"], "nm", "fitted"),
+    ):
+        add_parameter("model", parameter, meaning, value, units, status)
+
+    for mode in ("DF", "BF"):
+        if f"Rvis_{mode}_nm" in theta:
+            add_parameter(
+                "visibility base",
+                f"Rvis_{mode}_nm",
+                f"{mode} base 50% visibility radius",
+                theta[f"Rvis_{mode}_nm"],
+                "nm",
+                "fixed anchor",
+            )
+            add_parameter(
+                "visibility base",
+                f"dRvis_{mode}_nm",
+                f"{mode} base visibility transition width",
+                theta[f"dRvis_{mode}_nm"],
+                "nm",
+                "fixed anchor",
+            )
+    for temperature_C, value in sorted(theta.get("k_f_by_T", {}).items()):
+        add_parameter(
+            "event",
+            f"k_f_{temperature_C:g}C",
+            f"Shared faulted width ratio at {temperature_C:g} C",
+            value,
+            "-",
+            "fitted",
+        )
+    for temperature_C, value in sorted(theta.get("Puf_by_T", {}).items()):
+        add_parameter(
+            "event",
+            f"Puf_{temperature_C:g}C",
+            f"Faulted-to-perfect conversion rate at {temperature_C:g} C",
+            value,
+            "1/s",
+            "fitted",
+        )
+
+    with parameter_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=tuple(parameter_rows[0]))
+        writer.writeheader()
+        writer.writerows(parameter_rows)
+
+    thresholds = theta.get("image_visibility_rvis_nm", {})
+    widths = theta.get("image_visibility_drvis_nm", {})
+    offsets = theta.get("image_visibility_offsets_nm", {})
+    width_offsets = theta.get("image_visibility_width_log_offsets", {})
+    visibility_rows = []
+    for key, radius_nm in sorted(thresholds.items()):
+        series_id, event_order, mode, image_id = key
+        prediction = predictions.get(int(event_order), {})
+        visibility_rows.append(
+            {
+                "Series": series_id,
+                "Event": event_order,
+                "Temperature_C": prediction.get("temperature_C", ""),
+                "Mode": mode,
+                "Image": image_id,
+                "Rvis_nm": radius_nm,
+                "DeltaR_nm": widths.get(key, ""),
+                "Rvis_offset_nm": offsets.get(key, ""),
+                "Log_width_offset": width_offsets.get(key, ""),
+                "Status": "calibrated and frozen",
+            }
+        )
+    visibility_headers = (
+        "Series",
+        "Event",
+        "Temperature_C",
+        "Mode",
+        "Image",
+        "Rvis_nm",
+        "DeltaR_nm",
+        "Rvis_offset_nm",
+        "Log_width_offset",
+        "Status",
+    )
+    with visibility_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=visibility_headers)
+        writer.writeheader()
+        writer.writerows(visibility_rows)
+
+    return {
+        "fitted_parameters": parameter_path,
+        "visibility_parameters": visibility_path,
+    }
+
+
 def print_final_parameter_tables(theta, material, predictions, objective=None) -> None:
     """Print fitted, initial-condition, and derived annealing parameters."""
     if objective is not None:
@@ -43,11 +210,25 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
 
     fitted_rows = [
         (
-            "faulted family",
-            "Faulted-loop size distribution",
-            faulted_distribution_family(theta),
+            "faulted family DF",
+            "DF faulted-loop observation distribution",
+            faulted_distribution_family(theta, "DF"),
             "-",
             "selected",
+        ),
+        (
+            "faulted family BF",
+            "BF faulted-loop observation distribution",
+            faulted_distribution_family(theta, "BF"),
+            "-",
+            "selected",
+        ),
+        (
+            "perfect family BF",
+            "BF perfect-loop observation distribution",
+            "lognormal",
+            "-",
+            "fixed",
         ),
         ("D0", "Interstitial diffusion prefactor", _format_value(material.D0), "cm^2/s", "fixed"),
         ("Em", "Interstitial migration energy", _format_value(theta["Em"]), "eV", "fitted"),
@@ -57,19 +238,12 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         ("Ea_f", "Faulted-loop coalescence barrier", _format_value(theta["Ea_f"]), "eV", "fitted"),
         (
             "k_f(as-irradiated)",
-            "Faulted Gaussian sigma/center",
+            "Shared faulted width ratio for DF/BF families",
             _format_value(faulted_width_at_temperature(theta)),
             "-",
             "fitted",
         ),
         ("k_p", "Perfect distribution std/mean", _format_value(theta["k_p"]), "-", "fitted"),
-        (
-            "eta_BF,f",
-            "BF faulted-loop detection efficiency",
-            _format_value(theta.get("eta_bf_f", 1.0)),
-            "-",
-            "fitted",
-        ),
     ]
     if "Rvis_DF_nm" in theta:
         fitted_rows.extend(
@@ -108,7 +282,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         fitted_rows.append(
             (
                 f"k_f({temperature_C:g} C)",
-                "Faulted Gaussian sigma/center",
+                "Shared faulted width ratio for DF/BF families",
                 _format_value(value),
                 "-",
                 "fitted",
@@ -138,7 +312,11 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
 
     image_thresholds = theta.get("image_visibility_rvis_nm", {})
     image_offsets = theta.get("image_visibility_offsets_nm", {})
-    image_efficiencies = theta.get("image_visibility_efficiency", {})
+    image_widths = theta.get("image_visibility_drvis_nm", {})
+    image_width_offsets = theta.get(
+        "image_visibility_width_log_offsets",
+        {},
+    )
     if image_thresholds:
         calibration_rows = []
         for key, radius_nm in sorted(image_thresholds.items()):
@@ -151,7 +329,8 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
                     image_id,
                     _format_value(image_offsets.get(key, 0.0)),
                     _format_value(radius_nm),
-                    _format_value(image_efficiencies.get(key, 1.0)),
+                    _format_value(image_width_offsets.get(key, 0.0)),
+                    _format_value(image_widths[key]),
                 )
             )
         print("\nFROZEN IMAGE-SPECIFIC VISIBILITY VALUES")
@@ -162,8 +341,9 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
                 "Mode",
                 "Image",
                 "Offset (nm)",
-                "Rvis (nm)",
-                "Efficiency",
+                "R threshold (nm)",
+                "log-width offset",
+                "Delta R (nm)",
             ),
             calibration_rows,
         )
@@ -217,9 +397,10 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
     )
 
     visibility_rows = []
-    family_f = faulted_distribution_family(theta)
+    family_f_df = faulted_distribution_family(theta, "DF")
+    family_f_bf = faulted_distribution_family(theta, "BF")
     image_thresholds = theta.get("image_visibility_rvis_nm", {})
-    image_efficiencies = theta.get("image_visibility_efficiency", {})
+    image_widths = theta.get("image_visibility_drvis_nm", {})
 
     def local_thetas(event_order, mode):
         selected_items = [
@@ -235,9 +416,8 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         for key, radius_nm in selected_items:
             local_theta = dict(theta)
             local_theta[f"Rvis_{mode}_nm"] = float(radius_nm)
-            local_theta[f"visibility_efficiency_{mode}"] = float(
-                image_efficiencies.get(key, 1.0)
-            )
+            if key in image_widths:
+                local_theta[f"dRvis_{mode}_nm"] = float(image_widths[key])
             results.append(local_theta)
         return results
 
@@ -271,7 +451,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
                     visible_fraction_of_distribution(
                         Df_nm,
                         k_f,
-                        family_f,
+                        family_f_df,
                         "DF",
                         local_theta,
                     )
@@ -285,7 +465,7 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
                     visible_fraction_of_distribution(
                         Df_nm,
                         k_f,
-                        family_f,
+                        family_f_bf,
                         "BF",
                         local_theta,
                     )

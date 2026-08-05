@@ -8,6 +8,7 @@ from .observables import (
     binned_loop_number_density_from_images,
     predicted_loop_number_density_distribution,
     predicted_mean_diameters_nm,
+    predicted_observed_mean_diameter_nm,
     predicted_observed_number_density,
     predicted_visible_mean_diameters_nm,
     theta_for_image_visibility,
@@ -65,6 +66,20 @@ def plot_model_vs_data(
         theta,
         radius_unit_to_nm=radius_unit_to_nm,
     )
+    physical_theta = dict(theta)
+    mode_key = str(mode).strip().upper()
+    physical_theta.pop(f"Rvis_{mode_key}_nm", None)
+    physical_theta.pop(f"dRvis_{mode_key}_nm", None)
+    physical_density_nm4 = (
+        CM3_TO_NM3
+        * predicted_loop_number_density_distribution(
+            x,
+            mode,
+            prediction,
+            physical_theta,
+            radius_unit_to_nm=radius_unit_to_nm,
+        )
+    )
     bin_edges = np.linspace(0.0, x_max, bins + 1)
     data_density = binned_loop_number_density_from_images(
         values_nm,
@@ -83,7 +98,21 @@ def plot_model_vs_data(
         edgecolor="black",
         label="Experimental data",
     )
-    plt.plot(x, model_density_nm4, linewidth=2.5, label="RT+ fitted distribution")
+    plt.plot(
+        x,
+        physical_density_nm4,
+        linewidth=1.8,
+        linestyle="--",
+        color="#6a737d",
+        label="Model without image visibility",
+    )
+    plt.plot(
+        x,
+        model_density_nm4,
+        linewidth=2.5,
+        color="#f26b21",
+        label="Model with image visibility",
+    )
     plt.axvline(
         visible_Df_nm,
         linestyle="--",
@@ -140,7 +169,7 @@ def plot_event_series_results(
     faulted_size_fit_fraction: float = 0.95,
     faulted_full_distribution_temperatures=(1100.0,),
 ):
-    """Plot fitted BF/DF distributions using common axes across events."""
+    """Plot physical and image-visibility-filtered fits on common axes."""
     if predictions is None:
         predictions = simulate_all_series(
             event_series=event_series,
@@ -201,6 +230,7 @@ def plot_event_series_results(
                 x_max = x_limits[mode]
                 x = np.linspace(max(1e-6, x_max / 5000), x_max, 500)
                 image_model_densities = []
+                physical_model_densities = []
                 visible_faulted_means = []
                 visible_perfect_means = []
                 for image_id in sorted(group["image"].astype(str).unique()):
@@ -221,6 +251,19 @@ def plot_event_series_results(
                             radius_unit_to_nm=radius_unit_to_nm,
                         )
                     )
+                    physical_theta = dict(image_theta)
+                    physical_theta.pop(f"Rvis_{mode}_nm", None)
+                    physical_theta.pop(f"dRvis_{mode}_nm", None)
+                    physical_model_densities.append(
+                        CM3_TO_NM3
+                        * predicted_loop_number_density_distribution(
+                            x,
+                            mode,
+                            prediction,
+                            physical_theta,
+                            radius_unit_to_nm=radius_unit_to_nm,
+                        )
+                    )
                     image_Df_nm, image_Dp_nm = (
                         predicted_visible_mean_diameters_nm(
                             mode,
@@ -233,6 +276,10 @@ def plot_event_series_results(
                     visible_perfect_means.append(image_Dp_nm)
                 model_density_nm4 = np.mean(
                     np.vstack(image_model_densities),
+                    axis=0,
+                )
+                physical_density_nm4 = np.mean(
+                    np.vstack(physical_model_densities),
                     axis=0,
                 )
                 Df_nm = float(np.mean(visible_faulted_means))
@@ -261,15 +308,36 @@ def plot_event_series_results(
                 )
                 ax.plot(
                     x,
+                    physical_density_nm4,
+                    linewidth=1.8,
+                    linestyle="--",
+                    color="#6a737d",
+                    label="Model without image visibility",
+                )
+                ax.plot(
+                    x,
                     model_density_nm4,
                     linewidth=2.3,
                     color="#ba0c2f",
                     label=(
-                        "Visible model"
+                        "Model with image visibility"
                         if mode == "DF"
-                        else "Mean image-visible RT+ model"
+                        else "Mean model with image visibility"
                     ),
                 )
+                if mode == "BF" and (
+                    not event.simulate
+                    or np.isclose(float(event.temperature_C), 900.0)
+                ):
+                    # The pre-visibility BF peak is intentionally allowed to
+                    # clip so the experimental histogram and corrected model
+                    # remain legible at RT and 900 C.
+                    visible_scale_maximum = max(
+                        float(np.max(data_density)),
+                        float(np.max(model_density_nm4)),
+                    )
+                    if visible_scale_maximum > 0.0:
+                        ax.set_ylim(0.0, 1.10 * visible_scale_maximum)
                 ax.axvline(
                     Df_nm,
                     linestyle="--",
@@ -583,9 +651,10 @@ def plot_model_vs_images_per_temperature(
         density_j = n_j / (V_image * Delta_D)
 
     Images at the same event and imaging mode use common bins, x limits, and y
-    limits. The model is not rescaled to an individual image. Diagnostic
-    overlay for the underlying pre-visibility Gaussian is hidden by default to
-    keep meeting figures readable. Fitting limits are never drawn.
+    limits. The model is not rescaled to an individual image. Every panel
+    compares the shared physical prediction before the image-specific smooth
+    visibility filter with the prediction after that filter. Fitting limits
+    are never drawn. ``show_diagnostics`` is retained for API compatibility.
     """
 
     binning = str(binning).strip().lower()
@@ -610,23 +679,12 @@ def plot_model_vs_images_per_temperature(
     selected_series = loop_data[loop_data["series_id"] == series_id]
     figures = {}
     data_colors = {"BF": "#d98b9b", "DF": "#8bb8d8"}
-    mean_colors = {"BF": "#ba0c2f", "DF": "#1f77b4"}
-
     for event in sorted(event_series[series_id], key=lambda item: item.event_order):
         if event.event_order not in series_predictions:
             raise KeyError(
                 f"Missing model prediction for event {event.event_order}."
             )
         prediction = series_predictions[event.event_order]
-        use_full_faulted_distribution = any(
-            np.isclose(
-                float(event.temperature_C),
-                float(selected_temperature),
-                rtol=0.0,
-                atol=1.0e-9,
-            )
-            for selected_temperature in faulted_full_distribution_temperatures
-        )
         event_data = selected_series[
             selected_series["event_order"] == event.event_order
         ]
@@ -694,37 +752,12 @@ def plot_model_vs_images_per_temperature(
             for column, image_id in enumerate(image_ids_by_mode[mode]):
                 axis = axes[row, column]
                 image_data = mode_data[mode_data["image"].astype(str) == image_id]
-                fit_upper_nm = np.inf
-                n_size_fit = len(image_data)
-                if (
-                    mode == "DF"
-                    and faulted_size_fit_fraction < 1.0
-                    and not use_full_faulted_distribution
-                ):
-                    fit_upper_nm = float(
-                        np.quantile(
-                            image_data["size"].to_numpy(dtype=float),
-                            faulted_size_fit_fraction,
-                        )
-                    )
-                    n_size_fit = int(
-                        np.count_nonzero(
-                            image_data["size"].to_numpy(dtype=float)
-                            <= fit_upper_nm
-                        )
-                    )
                 image_theta = theta_for_image_visibility(
                     theta,
                     series_id=series_id,
                     event_order=event.event_order,
                     mode=mode,
                     image_id=image_id,
-                )
-                Df_nm, Dp_nm = predicted_visible_mean_diameters_nm(
-                    mode,
-                    prediction,
-                    image_theta,
-                    radius_unit_to_nm=radius_unit_to_nm,
                 )
                 model_density_nm4 = (
                     CM3_TO_NM3
@@ -736,41 +769,50 @@ def plot_model_vs_images_per_temperature(
                         radius_unit_to_nm=radius_unit_to_nm,
                     )
                 )
-                predicted_visible_density_nm3 = (
+                unfiltered_theta = dict(image_theta)
+                unfiltered_theta.pop(f"Rvis_{mode}_nm", None)
+                unfiltered_theta.pop(f"dRvis_{mode}_nm", None)
+                unfiltered_density_nm4 = (
                     CM3_TO_NM3
-                    * predicted_observed_number_density(
+                    * predicted_loop_number_density_distribution(
+                        model_x,
                         mode,
                         prediction,
-                        image_theta,
+                        unfiltered_theta,
                         radius_unit_to_nm=radius_unit_to_nm,
                     )
                 )
-                unfiltered_density_nm4 = None
-                if mode == "DF" and show_diagnostics:
-                    unfiltered_theta = dict(image_theta)
-                    unfiltered_theta.pop("Rvis_DF_nm", None)
-                    unfiltered_theta.pop("dRvis_DF_nm", None)
-                    unfiltered_density_nm4 = (
-                        CM3_TO_NM3
-                        * predicted_loop_number_density_distribution(
-                            model_x,
-                            mode,
-                            prediction,
-                            unfiltered_theta,
-                            radius_unit_to_nm=radius_unit_to_nm,
-                        )
-                    )
+                observed_mean_nm = float(
+                    image_data["size"].to_numpy(dtype=float).mean()
+                )
+                physical_mean_nm = predicted_observed_mean_diameter_nm(
+                    mode,
+                    prediction,
+                    unfiltered_theta,
+                    radius_unit_to_nm=radius_unit_to_nm,
+                )
+                visible_mean_nm = predicted_observed_mean_diameter_nm(
+                    mode,
+                    prediction,
+                    image_theta,
+                    radius_unit_to_nm=radius_unit_to_nm,
+                )
                 row_maximum = max(
                     row_maximum,
                     float(np.max(model_density_nm4)),
                 )
-                if show_diagnostics and unfiltered_density_nm4 is not None:
+                crop_bf_to_visible_scale = (
+                    mode == "BF"
+                    and (
+                        not event.simulate
+                        or np.isclose(float(event.temperature_C), 900.0)
+                    )
+                )
+                if mode != "BF" or not crop_bf_to_visible_scale:
                     row_maximum = max(
                         row_maximum,
                         float(np.max(unfiltered_density_nm4)),
                     )
-                volume_nm3 = float(image_data["volume_nm3_effective"].iloc[0])
-                observed_density_nm3 = float(len(image_data)) / volume_nm3
                 density_nm4 = binned_loop_number_density_from_images(
                     image_data["size"].to_numpy(dtype=float),
                     image_data["image"].to_numpy(),
@@ -785,39 +827,29 @@ def plot_model_vs_images_per_temperature(
                     alpha=0.55,
                     linewidth=1.5,
                     color=data_colors[mode],
-                    label="Data",
+                    label=f"Data mean = {observed_mean_nm:.2f} nm",
+                )
+                axis.plot(
+                    model_x,
+                    unfiltered_density_nm4,
+                    color="#6a737d",
+                    linewidth=1.7,
+                    linestyle="--",
+                    label=(
+                        "Before visibility mean = "
+                        f"{physical_mean_nm:.2f} nm"
+                    ),
                 )
                 axis.plot(
                     model_x,
                     model_density_nm4,
                     color="#f26b21",
                     linewidth=2.3,
-                    label="Visible model",
+                    label=(
+                        "After visibility mean = "
+                        f"{visible_mean_nm:.2f} nm"
+                    ),
                 )
-                if show_diagnostics and unfiltered_density_nm4 is not None:
-                    axis.plot(
-                        model_x,
-                        unfiltered_density_nm4,
-                        color="#6a737d",
-                        linewidth=1.3,
-                        linestyle=":",
-                        label="_nolegend_",
-                    )
-                axis.axvline(
-                    Df_nm,
-                    color=mean_colors["DF"],
-                    linestyle="--",
-                    linewidth=1.3,
-                    label="_nolegend_",
-                )
-                if mode == "BF":
-                    axis.axvline(
-                        Dp_nm,
-                        color="#7b2cbf",
-                        linestyle=":",
-                        linewidth=1.5,
-                        label="_nolegend_",
-                    )
 
                 axis.set_title(f"{mode} - {image_id}")
                 axis.set_xlim(0.0, x_max)
@@ -828,36 +860,6 @@ def plot_model_vs_images_per_temperature(
                     fontsize="x-small",
                     frameon=False,
                     loc="upper left",
-                )
-                mean_summary = f"Df,vis={Df_nm:.2f} nm"
-                if mode == "BF":
-                    mean_summary += f"; Dp,vis={Dp_nm:.2f} nm"
-                size_fit_summary = (
-                    f"\nSize fit={n_size_fit}/{len(image_data)}"
-                    if n_size_fit < len(image_data)
-                    else ""
-                )
-                axis.text(
-                    0.98,
-                    0.97,
-                    (
-                        f"n={len(image_data)}; ΔD={selected_bin_width:.3g} nm\n"
-                        f"Rvis={image_theta[f'Rvis_{mode}_nm']:.3f} nm; "
-                        f"η={image_theta.get(f'visibility_efficiency_{mode}', 1.0):.3f}\n"
-                        f"Nobs={observed_density_nm3:.2e}; "
-                        f"Nmodel={predicted_visible_density_nm3:.2e} nm⁻³\n"
-                        f"{mean_summary}{size_fit_summary}"
-                    ),
-                    transform=axis.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize="x-small",
-                    bbox={
-                        "facecolor": "white",
-                        "edgecolor": "none",
-                        "alpha": 0.82,
-                        "pad": 2.0,
-                    },
                 )
 
             for column in range(len(image_ids_by_mode[mode]), n_columns):
@@ -941,24 +943,27 @@ def plot_image_visibility_calibration(
     event_series,
     series_id="irradiated",
 ):
-    """Show the frozen relative visibility thresholds used for each image."""
+    """Show frozen image-specific visibility thresholds and widths."""
 
     thresholds = theta.get("image_visibility_rvis_nm", {})
     offsets = theta.get("image_visibility_offsets_nm", {})
-    efficiencies = theta.get("image_visibility_efficiency", {})
+    widths = theta.get("image_visibility_drvis_nm", {})
     events = {
         int(event.event_order): event
         for event in event_series[series_id]
     }
     fig, axes = plt.subplots(
-        1,
         2,
-        figsize=(11.0, 4.3),
+        2,
+        figsize=(11.0, 7.0),
         sharey=False,
         constrained_layout=True,
     )
-    for axis, mode in zip(axes, ("DF", "BF")):
+    for column, mode in enumerate(("DF", "BF")):
+        threshold_axis = axes[0, column]
+        width_axis = axes[1, column]
         base_rvis_nm = float(theta[f"Rvis_{mode}_nm"])
+        base_width_nm = float(theta[f"dRvis_{mode}_nm"])
         mode_items = sorted(
             (key, value)
             for key, value in thresholds.items()
@@ -986,30 +991,52 @@ def plot_image_visibility_calibration(
                     len(same_event),
                 )[image_rank]
             x_value = x_by_event[event_order] + float(jitter)
-            axis.scatter(
+            threshold_axis.scatter(
                 x_value,
                 radius_nm,
                 s=55,
                 color="#ba0c2f" if mode == "BF" else "#1f77b4",
                 zorder=3,
             )
-            axis.annotate(
+            threshold_axis.annotate(
                 f"{image_id.replace('Image ', '')}\n"
-                f"{offsets.get(key, 0.0):+.2f}; "
-                rf"$\eta$={efficiencies.get(key, 1.0):.2f}",
+                f"{offsets.get(key, 0.0):+.2f}",
                 (x_value, radius_nm),
                 xytext=(0, 7),
                 textcoords="offset points",
                 ha="center",
                 fontsize=8,
             )
+            width_nm = float(widths.get(key, base_width_nm))
+            width_axis.scatter(
+                x_value,
+                width_nm,
+                s=55,
+                color="#ba0c2f" if mode == "BF" else "#1f77b4",
+                zorder=3,
+            )
+            width_axis.annotate(
+                image_id.replace("Image ", ""),
+                (x_value, width_nm),
+                xytext=(0, 7),
+                textcoords="offset points",
+                ha="center",
+                fontsize=8,
+            )
 
-        axis.axhline(
+        threshold_axis.axhline(
             base_rvis_nm,
             color="#6a737d",
             linewidth=1.4,
             linestyle="--",
             label=f"Mode base = {base_rvis_nm:.2f} nm",
+        )
+        width_axis.axhline(
+            base_width_nm,
+            color="#6a737d",
+            linewidth=1.4,
+            linestyle="--",
+            label=f"Mode base = {base_width_nm:.2f} nm",
         )
         tick_labels = []
         for event_order in event_orders:
@@ -1019,15 +1046,18 @@ def plot_image_visibility_calibration(
                 if not event.simulate
                 else f"{event.temperature_C:g} °C"
             )
-        axis.set_xticks(range(len(event_orders)), tick_labels)
-        axis.set_ylabel(r"50% visibility radius, $R_{\mathrm{vis},i}$ (nm)")
-        axis.set_title(f"{mode} image thresholds")
-        axis.grid(axis="y", alpha=0.20)
-        axis.legend(frameon=False)
+        for axis in (threshold_axis, width_axis):
+            axis.set_xticks(range(len(event_orders)), tick_labels)
+            axis.grid(axis="y", alpha=0.20)
+            axis.legend(frameon=False)
+        threshold_axis.set_ylabel(r"50% visibility threshold, $R_{\mathrm{th},i}$ (nm)")
+        threshold_axis.set_title(f"{mode} thresholds")
+        width_axis.set_ylabel(r"Transition width, $\Delta R_i$ (nm)")
+        width_axis.set_title(f"{mode} transition widths")
 
     fig.suptitle(
         "Frozen image-specific TEM visibility calibration\n"
-        "labels show image ID, centered threshold offset (nm), and efficiency",
+        "labels show image ID; threshold labels also show centered offsets (nm)",
         fontsize=14,
     )
     return fig

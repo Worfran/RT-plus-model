@@ -84,6 +84,11 @@ class FitConfig:
     parallel_starts: bool = False
     max_workers: Optional[int] = None
     random_seed: int = 10
+    # These are optimizer-start multipliers, not additional fitted parameters.
+    # The baseline, moderate, and strong seeds let the existing fitted initial
+    # concentrations explore states with enough latent inventory to survive
+    # the complete RT -> 900 C -> 1100 C sequence.
+    initial_population_start_multipliers: Sequence[float] = (1.0, 3.0, 10.0)
     maxiter: int = 2000
     ftol: float = 1e-9
     gtol: float = 1e-6
@@ -104,12 +109,13 @@ class FitConfig:
     # is part of the annealing response that the ODE must reproduce.
     faulted_full_distribution_temperatures: Sequence[float] = (1100.0,)
     # The as-irradiated observation defines the initial condition inherited by
-    # every annealing step.  Give that boundary-condition measurement extra
-    # weight without freezing it or fitting it in a separate stage.
-    room_temperature_loss_weight: float = 3.0
-    # Positive size-distribution family used for faulted loops in both DF and
-    # the faulted contribution to BF.
-    faulted_distribution: str = "normal"
+    # every annealing step. Retain modest extra emphasis while allowing the
+    # later annealed observations to pull the jointly fitted initial state.
+    room_temperature_loss_weight: float = 1.5
+    # The same physical faulted-loop family is used in DF and in the faulted
+    # component of BF. Perfect loops are modeled as lognormal in BF.
+    faulted_distribution_df: str = "zero_truncated_normal"
+    faulted_distribution_bf: str = "zero_truncated_normal"
     # Smooth TEM visibility is treated as a calibrated observation setting,
     # not inferred from the same histograms whose physical width is being fit.
     # Fitting both simultaneously is poorly identifiable.
@@ -118,15 +124,29 @@ class FitConfig:
     dRvis_DF_nm: float = 0.15
     Rvis_BF_nm: float = 1.00
     dRvis_BF_nm: float = 0.25
-    # Relative image thresholds are calibrated before the physical fit from
-    # same-event, same-mode size contrasts.  The offsets are centered within
-    # each comparison group and frozen during RT+ optimization.
+    # Image-specific thresholds and transition widths are calibrated before
+    # the physical fit from same-event, same-mode size contrasts.  Their
+    # offsets are centered within each comparison group and frozen during RT+
+    # optimization.  There is deliberately no image efficiency/amplitude:
+    # sufficiently large loops have w_i(R) -> 1.
     image_specific_visibility: bool = True
     visibility_offset_sd_nm: float = 0.20
     visibility_max_offset_nm: float = 0.50
+    visibility_width_log_sd: float = 0.35
+    visibility_min_width_nm: float = 0.03
+    visibility_max_width_nm: float = 0.75
     image_visibility_rvis_nm: Mapping[tuple, float] = field(default_factory=dict)
     image_visibility_offsets_nm: Mapping[tuple, float] = field(default_factory=dict)
-    image_visibility_efficiency: Mapping[tuple, float] = field(default_factory=dict)
+    image_visibility_drvis_nm: Mapping[tuple, float] = field(default_factory=dict)
+    image_visibility_width_log_offsets: Mapping[tuple, float] = field(default_factory=dict)
+    # Manually reviewed image overrides are applied after the pooled
+    # same-condition calibration and remain frozen during the physical fit.
+    # Rvis is a loop radius: 1.75 nm corresponds to a 3.5 nm diameter midpoint.
+    image_visibility_rvis_overrides_nm: Mapping[tuple, float] = field(
+        default_factory=lambda: {
+            ("irradiated", 2, "DF", "Image 1135"): 1.75,
+        }
+    )
 
 
 @dataclass(frozen=True)

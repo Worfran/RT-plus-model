@@ -14,6 +14,9 @@ from .objective import total_objective
 from .parameters import build_theta0_and_bounds, randomize_theta0, unpack_theta
 
 
+INITIAL_POPULATION_PARAMETER_NAMES = ("Ci0", "Cv0", "Cf0", "Cp0")
+
+
 @dataclass(frozen=True)
 class FitResult:
     success: bool
@@ -45,7 +48,10 @@ def run_single_start(
     )
 
     theta = unpack_theta(result.x, parameter_temperatures, specs=parameter_specs)
-    theta["faulted_distribution"] = fit_config.faulted_distribution
+    theta["faulted_distribution_by_mode"] = {
+        "DF": fit_config.faulted_distribution_df,
+        "BF": fit_config.faulted_distribution_bf,
+    }
     if fit_config.apply_smooth_visibility:
         theta.update(
             {
@@ -59,8 +65,11 @@ def run_single_start(
                 "image_visibility_offsets_nm": dict(
                     fit_config.image_visibility_offsets_nm
                 ),
-                "image_visibility_efficiency": dict(
-                    fit_config.image_visibility_efficiency
+                "image_visibility_drvis_nm": dict(
+                    fit_config.image_visibility_drvis_nm
+                ),
+                "image_visibility_width_log_offsets": dict(
+                    fit_config.image_visibility_width_log_offsets
                 ),
             }
         )
@@ -74,15 +83,105 @@ def run_single_start(
     )
 
 
+def _initial_population_parameter_indices(temperatures, parameter_specs):
+    """Map fitted initial concentration names to vector positions."""
+
+    n_temperatures = len([float(value) for value in temperatures])
+    indices = {}
+    vector_index = 0
+    for spec in parameter_specs:
+        if spec.scope == "global":
+            if spec.name in INITIAL_POPULATION_PARAMETER_NAMES:
+                if spec.transform != "log":
+                    raise ValueError(
+                        f"Initial population {spec.name} must use a log transform."
+                    )
+                indices[spec.name] = vector_index
+            vector_index += 1
+        elif spec.scope == "per_temperature":
+            vector_index += n_temperatures
+        else:
+            raise ValueError(f"Unknown parameter scope: {spec.scope}")
+    return indices
+
+
+def overshoot_initial_population_start(
+    theta0,
+    bounds,
+    temperatures,
+    parameter_specs,
+    multiplier,
+):
+    """Scale existing fitted initial concentrations without adding parameters."""
+
+    multiplier = float(multiplier)
+    if not np.isfinite(multiplier) or multiplier < 1.0:
+        raise ValueError("Initial-population start multipliers must be at least one.")
+
+    start = np.asarray(theta0, dtype=float).copy()
+    for vector_index in _initial_population_parameter_indices(
+        temperatures,
+        parameter_specs,
+    ).values():
+        low, high = bounds[vector_index]
+        start[vector_index] = np.clip(
+            start[vector_index] + np.log(multiplier),
+            low,
+            high,
+        )
+    return start
+
+
 def make_start_vectors(temperatures, fit_config: FitConfig, parameter_specs):
     theta0, bounds = build_theta0_and_bounds(temperatures, specs=parameter_specs)
     rng = np.random.default_rng(fit_config.random_seed)
+    multipliers = tuple(
+        float(value)
+        for value in fit_config.initial_population_start_multipliers
+    )
+    if not multipliers or any(
+        not np.isfinite(value) or value < 1.0
+        for value in multipliers
+    ):
+        raise ValueError(
+            "initial_population_start_multipliers must contain values >= 1."
+        )
+
+    anchors = [
+        overshoot_initial_population_start(
+            theta0,
+            bounds,
+            temperatures,
+            parameter_specs,
+            multiplier,
+        )
+        for multiplier in multipliers
+    ]
+    population_indices = tuple(
+        _initial_population_parameter_indices(
+            temperatures,
+            parameter_specs,
+        ).values()
+    )
     starts = []
     for i in range(fit_config.n_starts):
-        if i == 0:
-            starts.append(theta0.copy())
+        anchor = anchors[i % len(anchors)]
+        if i < len(anchors):
+            # Guarantee that baseline, moderate, and strong population seeds
+            # are evaluated before adding broader randomized starts.
+            starts.append(anchor.copy())
         else:
-            starts.append(randomize_theta0(theta0, bounds, rng))
+            randomized = randomize_theta0(theta0, bounds, rng)
+            # Preserve the selected population scale while continuing to
+            # randomize every kinetic and distribution parameter broadly.
+            for vector_index in population_indices:
+                low, high = bounds[vector_index]
+                randomized[vector_index] = np.clip(
+                    anchor[vector_index] + rng.normal(0.0, np.log(2.0)),
+                    low,
+                    high,
+                )
+            starts.append(randomized)
     return starts, bounds
 
 

@@ -57,40 +57,25 @@ KINETIC_PARAMETER_SPECS = (
     # temperature has another, allowing the distribution to broaden or narrow
     # as the specimen evolves. The same event-specific width is also used for
     # the faulted component of BF.
-    # For the selected positive-centered Gaussian, k_f <= 1/3 keeps the latent
-    # Gaussian center at least three standard deviations above zero. Thus less
-    # than 0.14% of its probability is removed by positive truncation and the
-    # faulted distribution remains genuinely bell-shaped.
+    # Bawane et al. model faulted-loop radii with an ordinary Gaussian and
+    # report omega/R generally near 1.0-1.2.  Do not cap this ratio at 1/3 or
+    # renormalize the negative tail: the paper's observable moments integrate
+    # the Gaussian only over the detectable positive-radius range.
     ParameterSpec(
         "k_f_initial",
         scope="global",
         transform="log",
-        initial=0.25,
-        bounds=(0.05, 1.0 / 3.0),
+        initial=1.0,
+        bounds=(0.15, 1.5),
     ),
     ParameterSpec(
         "k_f",
         scope="per_temperature",
         transform="log",
-        initial=0.25,
-        bounds=(0.05, 1.0 / 3.0),
+        initial=1.0,
+        bounds=(0.15, 1.5),
     ),
     ParameterSpec("k_p", scope="global", transform="log", initial=0.5, bounds=(0.05, 3.0)),
-)
-
-
-OBSERVATION_PARAMETER_SPECS = (
-    # Effective probability that a physical faulted loop contributes to the
-    # measured BF population.  Bawane Eq. 5 supplies the crystallographic
-    # visibility factor (one); eta_bf_f additionally represents imperfect
-    # experimental detection in the present BF images.
-    ParameterSpec(
-        "eta_bf_f",
-        scope="global",
-        transform="log",
-        initial=0.20,
-        bounds=(0.01, 1.0),
-    ),
 )
 
 
@@ -117,7 +102,6 @@ VACANCY_EXTENSION_PARAMETER_SPECS = (
 
 DEFAULT_PARAMETER_SPECS = (
     KINETIC_PARAMETER_SPECS
-    + OBSERVATION_PARAMETER_SPECS
     + INITIAL_CONDITION_PARAMETER_SPECS
 )
 

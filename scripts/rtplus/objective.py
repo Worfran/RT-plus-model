@@ -186,7 +186,10 @@ def total_objective(
         parameter_temperatures,
         specs=parameter_specs,
     )
-    theta["faulted_distribution"] = fit_config.faulted_distribution
+    theta["faulted_distribution_by_mode"] = {
+        "DF": fit_config.faulted_distribution_df,
+        "BF": fit_config.faulted_distribution_bf,
+    }
     if fit_config.apply_smooth_visibility:
         theta.update(
             {
@@ -200,8 +203,11 @@ def total_objective(
                 "image_visibility_offsets_nm": dict(
                     fit_config.image_visibility_offsets_nm
                 ),
-                "image_visibility_efficiency": dict(
-                    fit_config.image_visibility_efficiency
+                "image_visibility_drvis_nm": dict(
+                    fit_config.image_visibility_drvis_nm
+                ),
+                "image_visibility_width_log_offsets": dict(
+                    fit_config.image_visibility_width_log_offsets
                 ),
             }
         )

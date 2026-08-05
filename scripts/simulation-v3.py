@@ -24,6 +24,8 @@ from dataclasses import replace
 from pathlib import Path
 import sys
 
+import numpy as np
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
@@ -44,12 +46,11 @@ from rtplus.observables import (
 )
 from rtplus.parameters import build_theta0_and_bounds, get_parameter_temperatures, parameter_specs, unpack_theta
 from rtplus.plotting import plot_meeting_results
-from rtplus.reporting import print_final_parameter_tables
+from rtplus.reporting import print_final_parameter_tables, write_fit_result_tables
 from rtplus.simulation import simulate_all_series
 from rtplus.visibility_calibration import (
     calibrate_image_visibility,
     print_visibility_calibration,
-    refine_image_visibility_efficiencies,
 )
 
 
@@ -66,6 +67,17 @@ def parse_args():
     p.add_argument("--parallel-starts", action="store_true", help="Parallelize only optimizer starts. No temperature-level parallelism.")
     p.add_argument("--max-workers", type=int, default=None, help="Max workers for parallel starts.")
     p.add_argument("--seed", type=int, default=10, help="Random seed for randomized optimizer starts.")
+    p.add_argument(
+        "--initial-population-start-multipliers",
+        nargs="+",
+        type=float,
+        default=[1.0, 3.0, 10.0],
+        help=(
+            "Multipliers used to seed the existing fitted Ci0, Cf0, and Cp0 "
+            "concentrations. They change optimizer starts, not model parameters. "
+            "Default: 1 3 10."
+        ),
+    )
     p.add_argument("--ic-strategy", choices=["fit"], default="fit", help="Fit a nonredundant initial state from RT and annealing data.")
     p.add_argument("--t-end", type=float, default=None, help="Optional duration override for every simulated event, in seconds.")
     p.add_argument("--enable-surface-sink", action="store_true", help="Enable the optional 100 nm two-surface point-defect sink extension.")
@@ -109,19 +121,35 @@ def parse_args():
     p.add_argument(
         "--rt-initial-state-weight",
         type=float,
-        default=3.0,
+        default=1.5,
         help=(
             "Relative objective weight for the as-irradiated initial-state "
-            "observation."
+            "observation. Default: 1.5."
+        ),
+    )
+    distribution_choices = [
+        "normal",
+        "zero_truncated_normal",
+        "truncated_normal",
+        "lognormal",
+    ]
+    p.add_argument(
+        "--df-faulted-distribution",
+        choices=distribution_choices,
+        default="zero_truncated_normal",
+        help=(
+            "Faulted-loop observation family for DF. Default: Gaussian "
+            "centered at the RT+ radius and renormalized above zero."
         ),
     )
     p.add_argument(
-        "--faulted-distribution",
-        choices=["normal", "lognormal", "truncated_normal"],
-        default="normal",
+        "--bf-faulted-distribution",
+        choices=distribution_choices,
+        default="zero_truncated_normal",
         help=(
-            "Faulted-loop size family used consistently in DF and BF. "
-            "Default: positive-centered Gaussian."
+            "Faulted-loop component family for BF. Default: the same "
+            "positive, zero-truncated Gaussian used for DF. The "
+            "perfect-loop BF component remains lognormal."
         ),
     )
     p.add_argument(
@@ -154,15 +182,22 @@ def parse_args():
         help="Maximum absolute image visibility offset in nm.",
     )
     p.add_argument(
-        "--no-refine-visibility-efficiency",
-        action="store_true",
-        help="Skip the regularized model-assisted absolute efficiency refinement.",
+        "--visibility-width-log-sd",
+        type=float,
+        default=0.35,
+        help="Shrinkage scale for image log transition-width offsets.",
     )
     p.add_argument(
-        "--visibility-efficiency-refinement-strength",
+        "--visibility-min-width-nm",
+        type=float,
+        default=0.03,
+        help="Minimum calibrated image transition width in nm.",
+    )
+    p.add_argument(
+        "--visibility-max-width-nm",
         type=float,
         default=0.75,
-        help="Geometric correction strength in [0, 1] for frozen image efficiencies.",
+        help="Maximum calibrated image transition width in nm.",
     )
     p.add_argument("--debug-only", action="store_true", help="Run theta0 forward simulation and stop before fitting.")
     p.add_argument("--no-plot", action="store_true", help="Skip plots after fitting.")
@@ -172,6 +207,15 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.n_starts < 1:
+        raise ValueError("--n-starts must be at least one.")
+    if any(
+        not np.isfinite(value) or value < 1.0
+        for value in args.initial_population_start_multipliers
+    ):
+        raise ValueError(
+            "--initial-population-start-multipliers must contain values >= 1."
+        )
     if args.count_overdispersion_floor <= 0.0:
         raise ValueError("--count-overdispersion-floor must be positive.")
     if not 0.0 < args.faulted_size_fit_fraction <= 1.0:
@@ -180,10 +224,6 @@ def main():
         )
     if args.rt_initial_state_weight <= 0.0:
         raise ValueError("--rt-initial-state-weight must be positive.")
-    if not 0.0 <= args.visibility_efficiency_refinement_strength <= 1.0:
-        raise ValueError(
-            "--visibility-efficiency-refinement-strength must be in [0, 1]."
-        )
     if min(
         args.df_rvis_nm,
         args.df_drvis_nm,
@@ -191,8 +231,16 @@ def main():
         args.bf_drvis_nm,
         args.visibility_offset_sd_nm,
         args.visibility_max_offset_nm,
+        args.visibility_width_log_sd,
+        args.visibility_min_width_nm,
+        args.visibility_max_width_nm,
     ) <= 0.0:
-        raise ValueError("Visibility radii, widths, and offset scales must be positive.")
+        raise ValueError("Visibility radii, widths, and calibration scales must be positive.")
+    if args.visibility_min_width_nm >= args.visibility_max_width_nm:
+        raise ValueError(
+            "--visibility-min-width-nm must be smaller than "
+            "--visibility-max-width-nm."
+        )
 
     material = replace(
         MaterialConstants(),
@@ -206,6 +254,9 @@ def main():
         parallel_starts=args.parallel_starts,
         max_workers=args.max_workers,
         random_seed=args.seed,
+        initial_population_start_multipliers=tuple(
+            args.initial_population_start_multipliers
+        ),
         maxiter=args.maxiter,
         objective_mode=args.objective_mode,
         count_overdispersion_floor=args.count_overdispersion_floor,
@@ -214,7 +265,8 @@ def main():
             args.full_df_temperatures
         ),
         room_temperature_loss_weight=args.rt_initial_state_weight,
-        faulted_distribution=args.faulted_distribution,
+        faulted_distribution_df=args.df_faulted_distribution,
+        faulted_distribution_bf=args.bf_faulted_distribution,
         apply_smooth_visibility=not args.no_smooth_visibility,
         Rvis_DF_nm=args.df_rvis_nm,
         dRvis_DF_nm=args.df_drvis_nm,
@@ -223,6 +275,9 @@ def main():
         image_specific_visibility=not args.no_image_specific_visibility,
         visibility_offset_sd_nm=args.visibility_offset_sd_nm,
         visibility_max_offset_nm=args.visibility_max_offset_nm,
+        visibility_width_log_sd=args.visibility_width_log_sd,
+        visibility_min_width_nm=args.visibility_min_width_nm,
+        visibility_max_width_nm=args.visibility_max_width_nm,
     )
     data_config = DataConfig(data_dir=args.data_dir)
 
@@ -254,6 +309,13 @@ def main():
         "As-irradiated initial-state loss weight: "
         f"{fit_config.room_temperature_loss_weight:g}"
     )
+    print(
+        "Initial-population start multipliers: "
+        + ", ".join(
+            f"{value:g}x"
+            for value in fit_config.initial_population_start_multipliers
+        )
+    )
 
     event_series = FIT_EVENT_SERIES
     if args.t_end is not None:
@@ -282,16 +344,69 @@ def main():
             },
             offset_sd_nm=fit_config.visibility_offset_sd_nm,
             max_offset_nm=fit_config.visibility_max_offset_nm,
+            width_log_sd=fit_config.visibility_width_log_sd,
+            min_width_nm=fit_config.visibility_min_width_nm,
+            max_width_nm=fit_config.visibility_max_width_nm,
         )
+        if fit_config.image_visibility_rvis_overrides_nm:
+            overridden_thresholds = dict(
+                visibility_calibration.rvis_by_image_nm
+            )
+            overridden_offsets = dict(
+                visibility_calibration.offset_by_image_nm
+            )
+            for raw_key, threshold_nm in (
+                fit_config.image_visibility_rvis_overrides_nm.items()
+            ):
+                key = (
+                    str(raw_key[0]),
+                    int(raw_key[1]),
+                    str(raw_key[2]).strip().upper(),
+                    str(raw_key[3]),
+                )
+                if key not in overridden_thresholds:
+                    raise KeyError(
+                        "Visibility override does not match a calibrated "
+                        f"image: {key!r}"
+                    )
+                threshold_nm = float(threshold_nm)
+                if threshold_nm <= 0.0:
+                    raise ValueError(
+                        "Image visibility override radii must be positive."
+                    )
+                base_threshold_nm = (
+                    fit_config.Rvis_DF_nm
+                    if key[2] == "DF"
+                    else fit_config.Rvis_BF_nm
+                )
+                overridden_thresholds[key] = threshold_nm
+                overridden_offsets[key] = threshold_nm - base_threshold_nm
+            visibility_calibration = replace(
+                visibility_calibration,
+                rvis_by_image_nm=overridden_thresholds,
+                offset_by_image_nm=overridden_offsets,
+            )
         fit_config = replace(
             fit_config,
             image_visibility_rvis_nm=visibility_calibration.rvis_by_image_nm,
             image_visibility_offsets_nm=visibility_calibration.offset_by_image_nm,
-            image_visibility_efficiency=(
-                visibility_calibration.efficiency_by_image
+            image_visibility_drvis_nm=(
+                visibility_calibration.drvis_by_image_nm
+            ),
+            image_visibility_width_log_offsets=(
+                visibility_calibration.width_log_offset_by_image
             ),
         )
         print_visibility_calibration(visibility_calibration)
+        for key, threshold_nm in sorted(
+            fit_config.image_visibility_rvis_overrides_nm.items()
+        ):
+            print(
+                "  Manual Rvis override: "
+                f"{key[0]} event={key[1]} {key[2]} {key[3]} = "
+                f"{float(threshold_nm):.3f} nm radius "
+                f"({2.0 * float(threshold_nm):.3f} nm diameter midpoint)"
+            )
 
     parameter_temperatures = get_parameter_temperatures(event_series)
     print("\nTemperatures with fitted event parameters:", parameter_temperatures)
@@ -299,7 +414,10 @@ def main():
     specs = parameter_specs(material.enable_vacancy_extension)
     theta0, _ = build_theta0_and_bounds(parameter_temperatures, specs=specs)
     theta_debug = unpack_theta(theta0, parameter_temperatures, specs=specs)
-    theta_debug["faulted_distribution"] = fit_config.faulted_distribution
+    theta_debug["faulted_distribution_by_mode"] = {
+        "DF": fit_config.faulted_distribution_df,
+        "BF": fit_config.faulted_distribution_bf,
+    }
     if fit_config.apply_smooth_visibility:
         theta_debug.update(
             {
@@ -313,8 +431,11 @@ def main():
                 "image_visibility_offsets_nm": dict(
                     fit_config.image_visibility_offsets_nm
                 ),
-                "image_visibility_efficiency": dict(
-                    fit_config.image_visibility_efficiency
+                "image_visibility_drvis_nm": dict(
+                    fit_config.image_visibility_drvis_nm
+                ),
+                "image_visibility_width_log_offsets": dict(
+                    fit_config.image_visibility_width_log_offsets
                 ),
             }
         )
@@ -361,59 +482,6 @@ def main():
         specs,
     )
 
-    if (
-        fit_config.apply_smooth_visibility
-        and fit_config.image_specific_visibility
-        and not args.no_refine_visibility_efficiency
-    ):
-        preliminary_initial_states = fitted_initial_states(
-            best.theta,
-            material,
-            event_series,
-        )
-        preliminary_predictions = simulate_all_series(
-            event_series=event_series,
-            theta=best.theta,
-            material=material,
-            initial_states=preliminary_initial_states,
-        )
-        refined_efficiencies, refinement_diagnostics = (
-            refine_image_visibility_efficiencies(
-                loop_data,
-                theta=best.theta,
-                predictions=preliminary_predictions,
-                current_efficiencies=(
-                    fit_config.image_visibility_efficiency
-                ),
-                strength=args.visibility_efficiency_refinement_strength,
-            )
-        )
-        print("\nMODEL-ASSISTED IMAGE EFFICIENCY REFINEMENT")
-        print(
-            "  One regularized update is frozen before the final physical refit."
-        )
-        for diagnostic in refinement_diagnostics:
-            key = diagnostic["key"]
-            print(
-                f"  {key[0]} event={key[1]} {key[2]} {key[3]}: "
-                f"eta {diagnostic['old_efficiency']:.4f} -> "
-                f"{diagnostic['new_efficiency']:.4f}; "
-                f"Nobs/Npred="
-                f"{diagnostic['observed_density'] / diagnostic['predicted_density']:.3f}"
-            )
-        fit_config = replace(
-            fit_config,
-            image_visibility_efficiency=refined_efficiencies,
-        )
-        best, all_results = run_multistart(
-            loop_data,
-            material,
-            event_series,
-            parameter_temperatures,
-            fit_config,
-            specs,
-        )
-
     print("\nAll starts:")
     for r in all_results:
         print(f"  start={r.start_index}, success={r.success}, objective={r.objective:.6e}, message={r.message}")
@@ -441,6 +509,16 @@ def main():
         predictions=best_predictions["irradiated"],
         objective=best.objective,
     )
+    table_paths = write_fit_result_tables(
+        output_dir=args.plot_dir,
+        theta=best.theta,
+        material=material,
+        predictions=best_predictions["irradiated"],
+        objective=best.objective,
+    )
+    print("\nSaved fitted-result tables:")
+    for path in table_paths.values():
+        print(f"  {path}")
     print("\nFitted event mean diameters:")
     for event_order, prediction in best_predictions["irradiated"].items():
         Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, best.theta)

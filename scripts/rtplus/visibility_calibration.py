@@ -1,12 +1,13 @@
-"""Calibrate relative TEM visibility thresholds between comparable images.
+"""Calibrate image-specific TEM visibility thresholds and transition widths.
 
-The calibration has two frozen image terms:
+For image ``i`` the observation model is
 
-1. a relative threshold inferred from size-composition contrasts, and
-2. a large-loop detection efficiency inferred from volume-normalized counts.
+    w_i(R) = 1 / (1 + exp(-(R - Rvis_i) / dRvis_i)).
 
-Separating them is necessary when an image has fewer loops per volume but still
-contains many small loops. A threshold alone cannot reproduce that pattern.
+Both parameters are inferred from size and volume-normalized count contrasts
+between images at the same event and imaging mode, then frozen before the RT+
+physical fit.  No image efficiency or amplitude is used: detectability
+approaches one for large loops.
 """
 from __future__ import annotations
 
@@ -26,108 +27,9 @@ class VisibilityCalibration:
 
     rvis_by_image_nm: dict[VisibilityKey, float]
     offset_by_image_nm: dict[VisibilityKey, float]
-    efficiency_by_image: dict[VisibilityKey, float]
+    drvis_by_image_nm: dict[VisibilityKey, float]
+    width_log_offset_by_image: dict[VisibilityKey, float]
     diagnostics: tuple[dict, ...]
-
-
-def regularized_efficiency_update(
-    current_efficiency,
-    observed_density,
-    predicted_density,
-    strength=0.75,
-    minimum_efficiency=0.05,
-):
-    """Update one frozen image efficiency toward its count residual.
-
-    ``strength < 1`` is geometric shrinkage: it corrects a systematic absolute
-    visibility mismatch without forcing every image count to match exactly.
-    """
-
-    current_efficiency = float(current_efficiency)
-    observed_density = float(observed_density)
-    predicted_density = float(predicted_density)
-    strength = float(strength)
-    if not 0.0 < current_efficiency <= 1.0:
-        raise ValueError("current_efficiency must be in (0, 1].")
-    if observed_density <= 0.0 or predicted_density <= 0.0:
-        raise ValueError("Observed and predicted densities must be positive.")
-    if not 0.0 <= strength <= 1.0:
-        raise ValueError("strength must be in [0, 1].")
-    updated = current_efficiency * (
-        observed_density / predicted_density
-    ) ** strength
-    return float(np.clip(updated, minimum_efficiency, 1.0))
-
-
-def refine_image_visibility_efficiencies(
-    loop_data,
-    *,
-    theta,
-    predictions,
-    current_efficiencies,
-    strength=0.75,
-    minimum_efficiency=0.05,
-):
-    """Refine frozen absolute efficiencies using one fitted physical state."""
-
-    # Local import avoids a module cycle: observables imports the canonical
-    # visibility_image_key from this module.
-    from .observables import (
-        predicted_observed_number_density,
-        theta_for_image_visibility,
-    )
-
-    refined = dict(current_efficiencies)
-    diagnostics = []
-    for (series_id, event_order, mode, image_id), image_data in loop_data.groupby(
-        ["series_id", "event_order", "mode", "image"],
-        sort=True,
-    ):
-        key = visibility_image_key(
-            series_id,
-            event_order,
-            mode,
-            image_id,
-        )
-        if key not in refined or series_id not in predictions:
-            continue
-        if int(event_order) not in predictions[series_id]:
-            continue
-        volumes = image_data["volume_cm3"].drop_duplicates().to_numpy(float)
-        if volumes.size != 1 or volumes[0] <= 0.0:
-            raise ValueError(f"Image {image_id!r} must have one positive volume.")
-        image_theta = theta_for_image_visibility(
-            theta,
-            series_id=series_id,
-            event_order=event_order,
-            mode=mode,
-            image_id=image_id,
-        )
-        predicted_density = predicted_observed_number_density(
-            mode,
-            predictions[series_id][int(event_order)],
-            image_theta,
-        )
-        observed_density = float(len(image_data)) / float(volumes[0])
-        old_efficiency = float(refined[key])
-        new_efficiency = regularized_efficiency_update(
-            old_efficiency,
-            observed_density,
-            predicted_density,
-            strength=strength,
-            minimum_efficiency=minimum_efficiency,
-        )
-        refined[key] = new_efficiency
-        diagnostics.append(
-            {
-                "key": key,
-                "old_efficiency": old_efficiency,
-                "new_efficiency": new_efficiency,
-                "observed_density": observed_density,
-                "predicted_density": predicted_density,
-            }
-        )
-    return refined, tuple(diagnostics)
 
 
 def visibility_image_key(
@@ -146,57 +48,72 @@ def visibility_image_key(
     )
 
 
-def _centered_values(free_values: np.ndarray) -> np.ndarray:
-    """Return an n-vector whose sum is exactly zero from n-1 values."""
+def _unpack_group_parameters(parameter_vector, n_images):
+    """Unpack image threshold offsets and transition-width effects."""
 
-    free_values = np.asarray(free_values, dtype=float)
-    return np.concatenate((free_values, [-float(np.sum(free_values))]))
+    n_images = int(n_images)
+    threshold_offsets_nm = np.asarray(
+        parameter_vector[:n_images],
+        dtype=float,
+    )
+    width_log_offsets = np.asarray(
+        parameter_vector[n_images : 2 * n_images],
+        dtype=float,
+    )
+    return threshold_offsets_nm, width_log_offsets
 
 
 def _group_conditional_nll(
     parameter_vector,
     diameters_nm,
     image_indices,
+    log_exposures,
     n_images,
     base_rvis_nm,
-    transition_nm,
+    base_transition_nm,
     offset_sd_nm,
     max_offset_nm,
+    width_log_sd,
+    min_width_nm,
+    max_width_nm,
 ):
     """Conditional image-label likelihood with the shared size law canceled.
 
     At a fixed event and mode,
 
-        P(image=i | D) proportional to exp(a_i) w_i(D).
+        P(image=i | D) proportional to V_i w_i(D).
 
-    The nuisance intercepts ``a_i`` absorb exposure and total-density
-    differences. Therefore threshold offsets describe low-diameter depletion
-    rather than being forced to explain uniform population differences.
+    The known sampled volume ``V_i`` is the only exposure term. Therefore a
+    volume-normalized count deficit must be explained by the image visibility
+    curve instead of disappearing into an unconstrained image intercept.
     """
 
-    n_free = n_images - 1
-    offsets_nm = _centered_values(parameter_vector[:n_free])
-    intercepts = np.concatenate(
-        (np.asarray(parameter_vector[n_free:], dtype=float), [0.0])
+    offsets_nm, width_log_offsets = _unpack_group_parameters(
+        parameter_vector,
+        n_images,
     )
     radii_nm = 0.5 * np.asarray(diameters_nm, dtype=float)
     thresholds_nm = float(base_rvis_nm) + offsets_nm
-    z = (
-        radii_nm[:, None] - thresholds_nm[None, :]
-    ) / float(transition_nm)
+    widths_nm = float(base_transition_nm) * np.exp(width_log_offsets)
+    z = (radii_nm[:, None] - thresholds_nm[None, :]) / widths_nm[None, :]
     log_visibility = -np.logaddexp(0.0, -z)
-    logits = intercepts[None, :] + log_visibility
+    logits = np.asarray(log_exposures, dtype=float)[None, :] + log_visibility
     selected = logits[np.arange(len(image_indices)), image_indices]
     nll = -float(np.sum(selected - logsumexp(logits, axis=1)))
 
-    # Gaussian partial pooling prevents poorly resolved groups from producing
-    # large image effects.  A smooth wall additionally enforces physical
-    # thresholds and the user-selected maximum relative correction.
+    # Partial pooling is essential because Rvis and dRvis can trade off over a
+    # limited diameter range. The priors preserve the paper-scale mode anchor
+    # while allowing a real image-specific count deficit to move the curve.
     nll += 0.5 * float(np.sum((offsets_nm / offset_sd_nm) ** 2))
-    excess = np.maximum(np.abs(offsets_nm) - max_offset_nm, 0.0)
-    nll += 1.0e5 * float(np.sum(excess**2))
+    nll += 0.5 * float(np.sum((width_log_offsets / width_log_sd) ** 2))
+
+    threshold_excess = np.maximum(np.abs(offsets_nm) - max_offset_nm, 0.0)
+    nll += 1.0e5 * float(np.sum(threshold_excess**2))
     negative_threshold = np.maximum(1.0e-6 - thresholds_nm, 0.0)
     nll += 1.0e7 * float(np.sum(negative_threshold**2))
+    too_narrow = np.maximum(float(min_width_nm) - widths_nm, 0.0)
+    too_wide = np.maximum(widths_nm - float(max_width_nm), 0.0)
+    nll += 1.0e7 * float(np.sum(too_narrow**2 + too_wide**2))
     return nll
 
 
@@ -208,39 +125,53 @@ def calibrate_image_visibility(
     transition_by_mode_nm,
     offset_sd_nm: float = 0.20,
     max_offset_nm: float = 0.50,
+    width_log_sd: float = 0.35,
+    min_width_nm: float = 0.03,
+    max_width_nm: float = 0.75,
 ) -> VisibilityCalibration:
-    """Estimate centered image-specific visibility offsets before RT+ fitting.
+    """Estimate image-specific ``Rvis`` and ``dRvis`` before RT+ fitting.
 
-    The calibration is performed independently inside each
-    ``(series, event, mode)`` group.  Images in a group share the underlying
-    physical size distribution; conditioning on measured diameter cancels that
-    unknown distribution. A second frozen efficiency term is then derived from
-    each image's count per sampled volume.
+    Calibration is independent inside each ``(series, event, mode)`` group.
+    Images in a group share the underlying physical size distribution, so
+    conditioning on measured diameter cancels that unknown distribution. The
+    image volume supplies the known exposure, allowing relative loop-count
+    differences to inform detectability without an efficiency parameter.
+    Single-image groups retain the mode-level threshold and width because no
+    within-condition contrast is available.
     """
 
-    if offset_sd_nm <= 0.0 or not np.isfinite(offset_sd_nm):
-        raise ValueError("offset_sd_nm must be positive and finite.")
-    if max_offset_nm <= 0.0 or not np.isfinite(max_offset_nm):
-        raise ValueError("max_offset_nm must be positive and finite.")
+    scalar_settings = {
+        "offset_sd_nm": offset_sd_nm,
+        "max_offset_nm": max_offset_nm,
+        "width_log_sd": width_log_sd,
+        "min_width_nm": min_width_nm,
+        "max_width_nm": max_width_nm,
+    }
+    if any(not np.isfinite(value) or value <= 0.0 for value in scalar_settings.values()):
+        raise ValueError("Visibility calibration scales and bounds must be positive and finite.")
+    if min_width_nm >= max_width_nm:
+        raise ValueError("min_width_nm must be smaller than max_width_nm.")
 
     selected = loop_data[
         loop_data["series_id"].astype(str).isin({str(item) for item in series_ids})
     ].copy()
     rvis_by_image_nm: dict[VisibilityKey, float] = {}
     offset_by_image_nm: dict[VisibilityKey, float] = {}
-    efficiency_by_image: dict[VisibilityKey, float] = {}
+    drvis_by_image_nm: dict[VisibilityKey, float] = {}
+    width_log_offset_by_image: dict[VisibilityKey, float] = {}
     diagnostics = []
 
-    grouped = selected.groupby(
-        ["series_id", "event_order", "mode"],
-        sort=True,
-    )
+    grouped = selected.groupby(["series_id", "event_order", "mode"], sort=True)
     for (series_id, event_order, mode), group in grouped:
         mode = str(mode).strip().upper()
         base_rvis_nm = float(base_rvis_by_mode_nm[mode])
-        transition_nm = float(transition_by_mode_nm[mode])
-        if base_rvis_nm <= 0.0 or transition_nm <= 0.0:
+        base_transition_nm = float(transition_by_mode_nm[mode])
+        if base_rvis_nm <= 0.0 or base_transition_nm <= 0.0:
             raise ValueError("Base visibility radii and widths must be positive.")
+        if not min_width_nm <= base_transition_nm <= max_width_nm:
+            raise ValueError(
+                f"Base {mode} transition width must be between the configured bounds."
+            )
 
         image_ids = sorted(group["image"].astype(str).unique())
         n_images = len(image_ids)
@@ -248,10 +179,11 @@ def calibrate_image_visibility(
             continue
 
         offsets_nm = np.zeros(n_images, dtype=float)
+        width_log_offsets = np.zeros(n_images, dtype=float)
         initial_nll = np.nan
         final_nll = np.nan
         success = True
-        message = "single image; no relative calibration"
+        message = "single image; mode-level visibility retained"
 
         if n_images > 1:
             image_to_index = {
@@ -262,98 +194,74 @@ def calibrate_image_visibility(
                 [image_to_index[str(value)] for value in group["image"]],
                 dtype=int,
             )
-            n_free = n_images - 1
-            theta0 = np.zeros(2 * n_free, dtype=float)
-            initial_nll = _group_conditional_nll(
-                theta0,
+            volumes_nm3 = np.array(
+                [
+                    float(
+                        group.loc[
+                            group["image"].astype(str) == image_id,
+                            "volume_nm3_effective",
+                        ].iloc[0]
+                    )
+                    for image_id in image_ids
+                ],
+                dtype=float,
+            )
+            if np.any(~np.isfinite(volumes_nm3)) or np.any(volumes_nm3 <= 0.0):
+                raise ValueError("Every visibility-calibration image needs a positive volume.")
+            log_exposures = np.log(volumes_nm3)
+            log_exposures -= float(np.mean(log_exposures))
+            theta0 = np.zeros(2 * n_images, dtype=float)
+            args = (
                 diameters_nm,
                 image_indices,
+                log_exposures,
                 n_images,
                 base_rvis_nm,
-                transition_nm,
+                base_transition_nm,
                 offset_sd_nm,
                 max_offset_nm,
+                width_log_sd,
+                min_width_nm,
+                max_width_nm,
             )
+            initial_nll = _group_conditional_nll(theta0, *args)
             result = minimize(
                 _group_conditional_nll,
                 theta0,
-                args=(
-                    diameters_nm,
-                    image_indices,
-                    n_images,
-                    base_rvis_nm,
-                    transition_nm,
-                    offset_sd_nm,
-                    max_offset_nm,
-                ),
+                args=args,
                 method="L-BFGS-B",
                 options={"maxiter": 2000, "ftol": 1.0e-12, "gtol": 1.0e-8},
             )
-            offsets_nm = _centered_values(result.x[:n_free])
-            offsets_nm = np.clip(
-                offsets_nm,
-                -float(max_offset_nm),
-                float(max_offset_nm),
+            offsets_nm, width_log_offsets = _unpack_group_parameters(
+                result.x,
+                n_images,
             )
-            # Clipping is normally inactive. Recenter once so the reported and
-            # applied group offsets retain the identifiability constraint.
-            offsets_nm -= float(np.mean(offsets_nm))
+            # These walls are normally inactive; clip only as numerical safety.
+            offsets_nm = np.clip(offsets_nm, -max_offset_nm, max_offset_nm)
+            widths_nm = np.clip(
+                base_transition_nm * np.exp(width_log_offsets),
+                min_width_nm,
+                max_width_nm,
+            )
+            width_log_offsets = np.log(widths_nm / base_transition_nm)
             success = bool(result.success)
             message = str(result.message)
             final_nll = float(result.fun)
 
-        group_thresholds = base_rvis_nm + offsets_nm
-        pooled_radii_nm = 0.5 * group["size"].to_numpy(dtype=float)
-        visibility_fractions = []
-        observed_densities = []
-        for image_id, threshold_nm in zip(image_ids, group_thresholds):
-            z = (pooled_radii_nm - threshold_nm) / transition_nm
-            visibility_fractions.append(
-                float(np.mean(1.0 / (1.0 + np.exp(-z))))
-            )
-            image_data = group[group["image"].astype(str) == image_id]
-            image_volumes = (
-                image_data["volume_nm3_effective"]
-                .drop_duplicates()
-                .to_numpy(dtype=float)
-            )
-            if (
-                image_volumes.size != 1
-                or not np.isfinite(image_volumes[0])
-                or image_volumes[0] <= 0.0
-            ):
-                raise ValueError(
-                    f"Image {image_id!r} must have one positive volume."
-                )
-            observed_densities.append(
-                float(len(image_data)) / float(image_volumes[0])
-            )
-        relative_physical_scores = (
-            np.asarray(observed_densities, dtype=float)
-            / np.maximum(np.asarray(visibility_fractions, dtype=float), 1.0e-12)
-        )
-        efficiencies = relative_physical_scores / float(
-            np.max(relative_physical_scores)
-        )
-        efficiencies = np.clip(efficiencies, 0.05, 1.0)
-
-        for image_id, offset_nm, efficiency in zip(
+        thresholds_nm = base_rvis_nm + offsets_nm
+        widths_nm = base_transition_nm * np.exp(width_log_offsets)
+        for image_id, offset_nm, threshold_nm, width_log_offset, width_nm in zip(
             image_ids,
             offsets_nm,
-            efficiencies,
+            thresholds_nm,
+            width_log_offsets,
+            widths_nm,
         ):
-            key = visibility_image_key(
-                series_id,
-                event_order,
-                mode,
-                image_id,
-            )
+            key = visibility_image_key(series_id, event_order, mode, image_id)
             offset_by_image_nm[key] = float(offset_nm)
-            rvis_by_image_nm[key] = max(
-                1.0e-6,
-                base_rvis_nm + float(offset_nm),
-            )
-            efficiency_by_image[key] = float(efficiency)
+            rvis_by_image_nm[key] = max(1.0e-6, float(threshold_nm))
+            width_log_offset_by_image[key] = float(width_log_offset)
+            drvis_by_image_nm[key] = float(width_nm)
 
         diagnostics.append(
             {
@@ -372,18 +280,20 @@ def calibrate_image_visibility(
     return VisibilityCalibration(
         rvis_by_image_nm=rvis_by_image_nm,
         offset_by_image_nm=offset_by_image_nm,
-        efficiency_by_image=efficiency_by_image,
+        drvis_by_image_nm=drvis_by_image_nm,
+        width_log_offset_by_image=width_log_offset_by_image,
         diagnostics=tuple(diagnostics),
     )
 
 
 def print_visibility_calibration(calibration: VisibilityCalibration) -> None:
-    """Print the frozen relative corrections and group-fit diagnostics."""
+    """Print the frozen image-specific thresholds and transition widths."""
 
     print("\nIMAGE-SPECIFIC VISIBILITY CALIBRATION")
     print(
-        "  Thresholds use same-event/same-mode size contrasts; efficiencies "
-        "use sampled volumes and loop-count differences."
+        "  Rvis and dRvis use same-event/same-mode size and "
+        "volume-normalized count contrasts; "
+        "there is no image efficiency parameter."
     )
     for diagnostic in calibration.diagnostics:
         improvement = (
@@ -411,7 +321,7 @@ def print_visibility_calibration(calibration: VisibilityCalibration) -> None:
         for key in group_keys:
             print(
                 f"    {key[3]}: "
-                f"offset={calibration.offset_by_image_nm[key]:+.4f} nm, "
+                f"Rvis offset={calibration.offset_by_image_nm[key]:+.4f} nm, "
                 f"Rvis={calibration.rvis_by_image_nm[key]:.4f} nm, "
-                f"eta={calibration.efficiency_by_image[key]:.4f}"
+                f"dRvis={calibration.drvis_by_image_nm[key]:.4f} nm"
             )

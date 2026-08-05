@@ -6,7 +6,7 @@ import unittest
 
 import numpy as np
 import pandas as pd
-from scipy.stats import truncnorm
+from scipy.stats import norm, truncnorm
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +24,7 @@ from rtplus.objective import (
 from rtplus.observables import (
     binned_loop_number_density,
     binned_loop_number_density_from_images,
+    faulted_distribution_family,
     image_number_density_statistics,
     loop_size_logpdf,
     positive_centered_normal_parameters,
@@ -33,9 +34,11 @@ from rtplus.observables import (
     predicted_observed_number_density,
     theta_for_image_visibility,
     truncated_normal_parameters_from_mean_and_k,
+    visible_fraction_of_distribution,
     visibility_log_weight,
 )
 from rtplus.ode import rhs
+from rtplus.optimization import make_start_vectors
 from rtplus.parameters import (
     build_theta0_and_bounds,
     faulted_width_at_temperature,
@@ -54,7 +57,6 @@ from rtplus.simulation import simulate_all_series
 from rtplus.reporting import print_final_parameter_tables
 from rtplus.visibility_calibration import (
     calibrate_image_visibility,
-    regularized_efficiency_update,
 )
 
 
@@ -74,20 +76,43 @@ class SimulationV3Tests(unittest.TestCase):
         rf = compute_radius(nf, cf, self.material.b, self.material.Omega0)
         rp = compute_radius(np_, cp, self.material.b, self.material.Omega0)
         self.assertAlmostEqual(
-            lognormal_mean_radius_from_rms(
-                rf,
-                faulted_width_at_temperature(self.theta),
-            )
-            * 1e7,
+            rf * 1e7,
             self.theta["Rf0_nm"],
             places=12,
         )
         self.assertAlmostEqual(
-            lognormal_mean_radius_from_rms(rp, self.theta["k_p"]) * 1e7,
+            rp * 1e7,
             self.theta["Rp0_nm"],
             places=12,
         )
         self.assertGreater(state[0], 1e10)
+
+    def test_multistart_overshoots_existing_initial_populations_only(self):
+        fit_config = FitConfig(
+            n_starts=4,
+            random_seed=3,
+            initial_population_start_multipliers=(1.0, 3.0, 10.0),
+        )
+        starts, _ = make_start_vectors(
+            self.temperatures,
+            fit_config,
+            self.specs,
+        )
+        baseline = unpack_theta(starts[0], self.temperatures, specs=self.specs)
+        moderate = unpack_theta(starts[1], self.temperatures, specs=self.specs)
+        strong = unpack_theta(starts[2], self.temperatures, specs=self.specs)
+
+        self.assertEqual(len(starts), 4)
+        self.assertEqual(len(starts[0]), len(self.theta_vec))
+        for name in ("Ci0", "Cf0", "Cp0"):
+            self.assertAlmostEqual(moderate[name] / baseline[name], 3.0)
+            self.assertAlmostEqual(strong[name] / baseline[name], 10.0)
+        for name in ("Rf0_nm", "Rp0_nm"):
+            self.assertAlmostEqual(moderate[name], baseline[name])
+            self.assertAlmostEqual(strong[name], baseline[name])
+
+    def test_default_rt_weight_is_relaxed_but_still_emphasized(self):
+        self.assertAlmostEqual(FitConfig().room_temperature_loss_weight, 1.5)
 
     def test_upper_trimmed_size_subset_keeps_the_small_loop_tail(self):
         values = np.arange(1.0, 101.0)
@@ -120,7 +145,7 @@ class SimulationV3Tests(unittest.TestCase):
             1.0,
         )
 
-    def test_lognormal_mean_and_second_moment_are_consistent(self):
+    def test_observation_center_uses_source_representative_radius(self):
         mean_radius = 1.7e-7
         k = 0.65
         rms_radius = lognormal_rms_radius_from_mean(mean_radius, k)
@@ -133,8 +158,8 @@ class SimulationV3Tests(unittest.TestCase):
             prediction,
             {"k_f": k, "k_p": k},
         )
-        self.assertAlmostEqual(mean_f_nm, mean_radius * 1e7)
-        self.assertAlmostEqual(mean_p_nm, mean_radius * 1e7)
+        self.assertAlmostEqual(mean_f_nm, rms_radius * 1e7)
+        self.assertAlmostEqual(mean_p_nm, rms_radius * 1e7)
 
     def test_faulted_width_is_temperature_dependent(self):
         self.assertIn("k_f_initial", self.theta)
@@ -180,7 +205,7 @@ class SimulationV3Tests(unittest.TestCase):
             annealed_prediction,
             theta,
         )
-        self.assertGreater(initial_mean_f, annealed_mean_f)
+        self.assertAlmostEqual(initial_mean_f, annealed_mean_f)
 
     def test_visibility_factors_enter_number_density(self):
         prediction = {"Rf": 1e-7, "Rp": 2e-7, "Cf": 8e16, "Cp": 4e16}
@@ -231,13 +256,13 @@ class SimulationV3Tests(unittest.TestCase):
             rtol=2.0e-4,
         )
 
-    def test_image_specific_visibility_activates_only_selected_threshold(self):
+    def test_image_specific_visibility_activates_selected_threshold_and_width(self):
         key = ("irradiated", 1, "DF", "Image B")
         theta = {
             "Rvis_DF_nm": 0.5,
             "dRvis_DF_nm": 0.15,
             "image_visibility_rvis_nm": {key: 0.8},
-            "image_visibility_efficiency": {key: 0.6},
+            "image_visibility_drvis_nm": {key: 0.31},
         }
         image_a = theta_for_image_visibility(
             theta,
@@ -255,8 +280,9 @@ class SimulationV3Tests(unittest.TestCase):
         )
         self.assertIs(image_a, theta)
         self.assertAlmostEqual(image_b["Rvis_DF_nm"], 0.8)
-        self.assertAlmostEqual(image_b["visibility_efficiency_DF"], 0.6)
+        self.assertAlmostEqual(image_b["dRvis_DF_nm"], 0.31)
         self.assertAlmostEqual(theta["Rvis_DF_nm"], 0.5)
+        self.assertAlmostEqual(theta["dRvis_DF_nm"], 0.15)
 
     def test_same_event_calibration_recovers_relative_visibility_order(self):
         rng = np.random.default_rng(4)
@@ -307,14 +333,18 @@ class SimulationV3Tests(unittest.TestCase):
             calibration.rvis_by_image_nm[key_a],
             calibration.rvis_by_image_nm[key_b],
         )
-        self.assertAlmostEqual(
-            calibration.offset_by_image_nm[key_a]
-            + calibration.offset_by_image_nm[key_b],
-            0.0,
-            places=12,
+        self.assertLessEqual(
+            abs(calibration.offset_by_image_nm[key_a]),
+            0.5,
         )
+        self.assertLessEqual(
+            abs(calibration.offset_by_image_nm[key_b]),
+            0.5,
+        )
+        self.assertGreater(calibration.drvis_by_image_nm[key_a], 0.0)
+        self.assertGreater(calibration.drvis_by_image_nm[key_b], 0.0)
 
-    def test_visibility_calibration_uses_loop_density_per_volume(self):
+    def test_visibility_calibration_uses_volume_normalized_count_deficit(self):
         common_sizes = np.linspace(1.0, 4.0, 500)
         rows = []
         for image_id, volume_nm3 in (
@@ -342,21 +372,10 @@ class SimulationV3Tests(unittest.TestCase):
         )
         key_a = ("irradiated", 1, "DF", "Image A")
         key_b = ("irradiated", 1, "DF", "Image B")
-        self.assertGreater(
-            calibration.efficiency_by_image[key_a],
-            calibration.efficiency_by_image[key_b],
+        self.assertLess(
+            calibration.rvis_by_image_nm[key_a],
+            calibration.rvis_by_image_nm[key_b],
         )
-
-    def test_regularized_efficiency_update_reduces_overprediction(self):
-        updated = regularized_efficiency_update(
-            current_efficiency=0.284,
-            observed_density=1.27,
-            predicted_density=4.97,
-            strength=0.75,
-        )
-        self.assertLess(updated, 0.284)
-        self.assertGreater(updated, 0.05)
-        self.assertAlmostEqual(updated, 0.1021, places=3)
 
     def test_truncated_normal_preserves_requested_mean_and_width(self):
         requested_mean = 3.2
@@ -387,26 +406,93 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertEqual(logpdf[0], -np.inf)
         self.assertTrue(np.all(np.isfinite(logpdf[1:])))
 
-    def test_positive_centered_normal_remains_bell_shaped(self):
+    def test_faulted_family_is_positive_normal_in_df_and_bf(self):
+        theta = {
+            "faulted_distribution_by_mode": {
+                "DF": "zero_truncated_normal",
+                "BF": "zero_truncated_normal",
+            }
+        }
+        self.assertEqual(
+            faulted_distribution_family(theta, "DF"),
+            "zero_truncated_normal",
+        )
+        self.assertEqual(
+            faulted_distribution_family(theta, "BF"),
+            "zero_truncated_normal",
+        )
+
         center = 3.0
-        k = 1.0 / 3.0
+        k = 1.1
+        values = np.array([-1.0, 1.0, 3.0, 6.0])
+        df_logpdf = loop_size_logpdf(
+            values,
+            center,
+            k,
+            faulted_distribution_family(theta, "DF"),
+        )
+        bf_logpdf = loop_size_logpdf(
+            values,
+            center,
+            k,
+            faulted_distribution_family(theta, "BF"),
+        )
+        self.assertEqual(df_logpdf[0], -np.inf)
+        self.assertEqual(bf_logpdf[0], -np.inf)
+        self.assertTrue(np.all(np.isfinite(df_logpdf[1:])))
+        self.assertTrue(np.all(np.isfinite(bf_logpdf[1:])))
+        np.testing.assert_allclose(df_logpdf[1:], bf_logpdf[1:])
+
+        defaults = FitConfig()
+        self.assertEqual(
+            defaults.faulted_distribution_df,
+            "zero_truncated_normal",
+        )
+        self.assertEqual(
+            defaults.faulted_distribution_bf,
+            "zero_truncated_normal",
+        )
+        self.assertEqual(
+            defaults.image_visibility_rvis_overrides_nm[
+                ("irradiated", 2, "DF", "Image 1135")
+            ],
+            1.75,
+        )
+
+    def test_paper_normal_is_not_renormalized_at_zero(self):
+        center = 3.0
+        k = 1.1
         location, scale, lower = positive_centered_normal_parameters(
             center,
             k,
         )
         self.assertAlmostEqual(location, center)
-        self.assertAlmostEqual(scale, 1.0)
-        self.assertAlmostEqual(lower, -3.0)
+        self.assertAlmostEqual(scale, 3.3)
+        self.assertAlmostEqual(lower, -1.0 / k)
         logpdf = loop_size_logpdf(
-            np.array([2.0, 3.0, 4.0]),
+            np.array([-1.0, 2.0, 3.0, 4.0]),
             center,
             k,
             "normal",
         )
-        self.assertAlmostEqual(logpdf[0], logpdf[2], places=12)
-        self.assertGreater(logpdf[1], logpdf[0])
+        self.assertEqual(logpdf[0], -np.inf)
+        self.assertAlmostEqual(logpdf[1], logpdf[3], places=12)
+        self.assertGreater(logpdf[2], logpdf[1])
 
-    def test_fitted_bf_faulted_detection_efficiency_changes_only_bf(self):
+        positive_fraction = visible_fraction_of_distribution(
+            center,
+            k,
+            "normal",
+            "DF",
+            {},
+        )
+        self.assertAlmostEqual(
+            positive_fraction,
+            norm.sf(0.0, loc=center, scale=k * center),
+            places=4,
+        )
+
+    def test_deprecated_bf_efficiency_does_not_change_fixed_visibility(self):
         prediction = {"Rf": 1e-7, "Rp": 2e-7, "Cf": 8e16, "Cp": 4e16}
         theta = {"k_f": 0.5, "k_p": 0.5, "eta_bf_f": 0.2}
         cfg = ObservationConfig(
@@ -418,7 +504,7 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertAlmostEqual(df_density, 0.25 * prediction["Cf"])
         self.assertAlmostEqual(
             bf_density,
-            0.2 * prediction["Cf"] + 0.5 * prediction["Cp"],
+            prediction["Cf"] + 0.5 * prediction["Cp"],
         )
 
     def test_binned_density_normalizes_by_bin_width_and_volume_density(self):
@@ -725,7 +811,7 @@ class SimulationV3Tests(unittest.TestCase):
         self.assertIn("FINAL MODEL PARAMETERS", report)
         self.assertIn("k_f", report)
         self.assertIn("k_p", report)
-        self.assertIn("eta_BF,f", report)
+        self.assertNotIn("eta_BF,f", report)
         self.assertIn("DERIVED EVENT VALUES", report)
 
 
