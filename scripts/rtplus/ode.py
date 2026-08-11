@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .physics import compute_radius, loop_flux
+from .physics import coalescence_number_loss, compute_radius, loop_flux
 
 
 def rhs(t: float, y: np.ndarray, params: dict) -> np.ndarray:
@@ -71,19 +71,37 @@ def rhs(t: float, y: np.ndarray, params: dict) -> np.ndarray:
     # two interstitials from Ci into the stored faulted-loop content Nf.
     diinterstitial_nucleation = Rii * Di * Ci_eff**2
 
+    # Interaction-driven coalescence from the loop-lifetime publication:
+    #   1/tau = lambda(T)*R*C^(5/3)
+    #   C/tau = lambda(T)*R*C^(8/3).
+    # Coalescence removes loop objects without removing their stored inventory.
+    faulted_coalescence_loss = coalescence_number_loss(
+        Pfcs,
+        Rf,
+        Cf_eff,
+        model=params.get("coalescence_model", "interaction_driven"),
+    )
+    perfect_coalescence_loss = coalescence_number_loss(
+        Pcs,
+        Rp,
+        Cp_eff,
+        model=params.get("coalescence_model", "interaction_driven"),
+    )
+
     df[0] = G0i - faulted_absorption - perfect_absorption - 2.0 * diinterstitial_nucleation - kiv * Ci_eff * Cv_eff - surface_sink_strength * Di * Ci_eff
     df[1] = G0v - kiv * Ci_eff * Cv_eff - surface_sink_strength * Dv * Cv_eff
 
-    # Stored interstitial content in faulted/perfect loops.
+    # Stored interstitial content in faulted/perfect loops. Coalescence does not
+    # appear here because merging conserves the combined loop inventory.
     # geometry_factor*Rf^2*Cf = Nf by definition.
     df[2] = faulted_absorption + 2.0 * diinterstitial_nucleation - Puf * geometry_factor * Rf**2 * Cf_eff
     df[3] = perfect_absorption + Puf * geometry_factor * Rf**2 * Cf_eff
 
-    # Faulted and perfect loop number densities.
-    # Faulted-loop coalescence conserves Nf while reducing Cf, allowing the
-    # second size moment Nf/Cf and therefore the representative radius to grow.
-    df[4] = diinterstitial_nucleation - Puf * Cf_eff - Pfcs * Cf_eff**2
-    df[5] = Puf * Cf_eff - Pcs * Cp_eff**2
+    # Faulted and perfect loop number densities. Reducing C at fixed stored
+    # inventory N increases the content-equivalent radius
+    # R = sqrt(Omega0*N/(pi*b*C)); no separate radius ODE is required.
+    df[4] = diinterstitial_nucleation - Puf * Cf_eff - faulted_coalescence_loss
+    df[5] = Puf * Cf_eff - perfect_coalescence_loss
 
     if not np.all(np.isfinite(df)):
         raise FloatingPointError("Non-finite ODE derivative.")

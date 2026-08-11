@@ -68,6 +68,15 @@ def parse_args():
     p.add_argument("--max-workers", type=int, default=None, help="Max workers for parallel starts.")
     p.add_argument("--seed", type=int, default=10, help="Random seed for randomized optimizer starts.")
     p.add_argument(
+        "--coalescence-model",
+        choices=["interaction_driven", "legacy_quadratic"],
+        default="interaction_driven",
+        help=(
+            "Loop-density loss law: the new R*C^(8/3) interaction-driven "
+            "model or the previous C^2 model."
+        ),
+    )
+    p.add_argument(
         "--initial-population-start-multipliers",
         nargs="+",
         type=float,
@@ -76,6 +85,15 @@ def parse_args():
             "Multipliers used to seed the existing fitted Ci0, Cf0, and Cp0 "
             "concentrations. They change optimizer starts, not model parameters. "
             "Default: 1 3 10."
+        ),
+    )
+    p.add_argument(
+        "--minimum-initial-population-multiplier",
+        type=float,
+        default=1.0,
+        help=(
+            "Hard lower bound on fitted Ci0, Cf0, and Cp0 relative to their "
+            "nominal initial values. Default: 1 (no hard overshoot constraint)."
         ),
     )
     p.add_argument("--ic-strategy", choices=["fit"], default="fit", help="Fit a nonredundant initial state from RT and annealing data.")
@@ -97,6 +115,17 @@ def parse_args():
         type=float,
         default=0.04,
         help="Minimum NB2 count overdispersion; 0.04 corresponds to 20%% image-level CV.",
+    )
+    p.add_argument(
+        "--absolute-count-modes",
+        nargs="+",
+        choices=["BF", "DF"],
+        default=["BF", "DF"],
+        help=(
+            "Imaging modes used as absolute loop-density constraints. DF "
+            "diameters remain fitted when DF counts are excluded. "
+            "Default: BF DF."
+        ),
     )
     p.add_argument(
         "--faulted-size-fit-fraction",
@@ -216,6 +245,13 @@ def main():
         raise ValueError(
             "--initial-population-start-multipliers must contain values >= 1."
         )
+    if (
+        not np.isfinite(args.minimum_initial_population_multiplier)
+        or args.minimum_initial_population_multiplier < 1.0
+    ):
+        raise ValueError(
+            "--minimum-initial-population-multiplier must be at least one."
+        )
     if args.count_overdispersion_floor <= 0.0:
         raise ValueError("--count-overdispersion-floor must be positive.")
     if not 0.0 < args.faulted_size_fit_fraction <= 1.0:
@@ -254,12 +290,17 @@ def main():
         parallel_starts=args.parallel_starts,
         max_workers=args.max_workers,
         random_seed=args.seed,
+        coalescence_model=args.coalescence_model,
         initial_population_start_multipliers=tuple(
             args.initial_population_start_multipliers
+        ),
+        initial_population_min_multiplier=(
+            args.minimum_initial_population_multiplier
         ),
         maxiter=args.maxiter,
         objective_mode=args.objective_mode,
         count_overdispersion_floor=args.count_overdispersion_floor,
+        absolute_count_modes=tuple(args.absolute_count_modes),
         faulted_size_fit_fraction=args.faulted_size_fit_fraction,
         faulted_full_distribution_temperatures=tuple(
             args.full_df_temperatures
@@ -288,10 +329,15 @@ def main():
     print_dataset_summary(loop_data)
     print_bf_df_density_consistency(loop_data)
     print(f"\nObjective mode: {fit_config.objective_mode}")
+    print(f"Coalescence model: {fit_config.coalescence_model}")
+    print(
+        "Absolute count constraints: "
+        + ", ".join(fit_config.absolute_count_modes)
+    )
     print(
         "Faulted-loop size likelihood: lowest "
         f"{100.0 * fit_config.faulted_size_fit_fraction:g}% per DF image "
-        "(upper tail trimmed from size loss only; all loops retained in counts)"
+        "(upper tail trimmed from size loss only)"
     )
     print(
         "Full DF size distributions retained at: "
@@ -315,6 +361,10 @@ def main():
             f"{value:g}x"
             for value in fit_config.initial_population_start_multipliers
         )
+    )
+    print(
+        "Minimum fitted initial-population multiplier: "
+        f"{fit_config.initial_population_min_multiplier:g}x"
     )
 
     event_series = FIT_EVENT_SERIES
@@ -411,13 +461,17 @@ def main():
     parameter_temperatures = get_parameter_temperatures(event_series)
     print("\nTemperatures with fitted event parameters:", parameter_temperatures)
 
-    specs = parameter_specs(material.enable_vacancy_extension)
+    specs = parameter_specs(
+        material.enable_vacancy_extension,
+        fit_config.coalescence_model,
+    )
     theta0, _ = build_theta0_and_bounds(parameter_temperatures, specs=specs)
     theta_debug = unpack_theta(theta0, parameter_temperatures, specs=specs)
     theta_debug["faulted_distribution_by_mode"] = {
         "DF": fit_config.faulted_distribution_df,
         "BF": fit_config.faulted_distribution_bf,
     }
+    theta_debug["coalescence_model"] = fit_config.coalescence_model
     if fit_config.apply_smooth_visibility:
         theta_debug.update(
             {
@@ -580,6 +634,7 @@ def main():
             initial_states=best_initial_states,
             predictions=best_predictions["irradiated"],
             output_dir=args.plot_dir,
+            show=False,
             faulted_size_fit_fraction=fit_config.faulted_size_fit_fraction,
             faulted_full_distribution_temperatures=(
                 fit_config.faulted_full_distribution_temperatures

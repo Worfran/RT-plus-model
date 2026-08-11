@@ -52,6 +52,7 @@ def run_single_start(
         "DF": fit_config.faulted_distribution_df,
         "BF": fit_config.faulted_distribution_bf,
     }
+    theta["coalescence_model"] = fit_config.coalescence_model
     if fit_config.apply_smooth_visibility:
         theta.update(
             {
@@ -134,6 +135,29 @@ def overshoot_initial_population_start(
 
 def make_start_vectors(temperatures, fit_config: FitConfig, parameter_specs):
     theta0, bounds = build_theta0_and_bounds(temperatures, specs=parameter_specs)
+    population_indices = tuple(
+        _initial_population_parameter_indices(
+            temperatures,
+            parameter_specs,
+        ).values()
+    )
+    minimum_multiplier = float(fit_config.initial_population_min_multiplier)
+    if not np.isfinite(minimum_multiplier) or minimum_multiplier < 1.0:
+        raise ValueError(
+            "initial_population_min_multiplier must be at least one."
+        )
+    constrained_bounds = list(bounds)
+    for vector_index in population_indices:
+        low, high = constrained_bounds[vector_index]
+        minimum_value = theta0[vector_index] + np.log(minimum_multiplier)
+        if minimum_value > high:
+            raise ValueError(
+                "Initial-population minimum multiplier exceeds the fitted "
+                "parameter bound."
+            )
+        constrained_bounds[vector_index] = (max(low, minimum_value), high)
+    bounds = constrained_bounds
+
     rng = np.random.default_rng(fit_config.random_seed)
     multipliers = tuple(
         float(value)
@@ -157,12 +181,6 @@ def make_start_vectors(temperatures, fit_config: FitConfig, parameter_specs):
         )
         for multiplier in multipliers
     ]
-    population_indices = tuple(
-        _initial_population_parameter_indices(
-            temperatures,
-            parameter_specs,
-        ).values()
-    )
     starts = []
     for i in range(fit_config.n_starts):
         anchor = anchors[i % len(anchors)]

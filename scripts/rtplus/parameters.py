@@ -45,12 +45,26 @@ class ParameterSpec:
 KINETIC_PARAMETER_SPECS = (
     ParameterSpec("Em", scope="global", transform="identity", initial=2.8, bounds=(0.1, 6.0)),
     ParameterSpec("Ea", scope="global", transform="identity", initial=1.9, bounds=(0.1, 6.0)),
-    ParameterSpec("P0", scope="global", transform="log", initial=1e-12, bounds=(1e-30, 1e-6)),
-    # Effective coalescence/ripening of the faulted-loop population.  This is
-    # separate from perfect-loop coalescence because the two loop types have
-    # different mobility and structure.
+    # Interaction-driven coalescence uses loss=lambda(T)*R*C^(8/3), so lambda0
+    # has units cm^4/s.  The initial value and bounds preserve the magnitude of
+    # the former quadratic law at R=1 nm and C=1e17 cm^-3.
+    ParameterSpec(
+        "P0",
+        scope="global",
+        transform="log",
+        initial=4.6415888336e-17,
+        bounds=(4.6415888336e-35, 4.6415888336e-11),
+    ),
+    # The faulted-loop lifetime amplitude is separate because faulted and
+    # perfect loops can have different mobility and interaction strength.
     ParameterSpec("Ea_f", scope="global", transform="identity", initial=1.9, bounds=(0.1, 6.0)),
-    ParameterSpec("P0_f", scope="global", transform="log", initial=1e-12, bounds=(1e-30, 1e-6)),
+    ParameterSpec(
+        "P0_f",
+        scope="global",
+        transform="log",
+        initial=4.6415888336e-17,
+        bounds=(4.6415888336e-35, 4.6415888336e-11),
+    ),
     ParameterSpec("Puf", scope="per_temperature", transform="log", initial=1e-5, bounds=(1e-10, 1e-2)),
     # Rel-rod data directly identify the faulted-loop width. The initial
     # as-irradiated population has its own width and each simulated annealing
@@ -106,8 +120,41 @@ DEFAULT_PARAMETER_SPECS = (
 )
 
 
-def parameter_specs(enable_vacancy_extension: bool = False):
-    specs = DEFAULT_PARAMETER_SPECS
+LEGACY_QUADRATIC_COALESCENCE_SPECS = {
+    "P0": ParameterSpec(
+        "P0",
+        scope="global",
+        transform="log",
+        initial=1e-12,
+        bounds=(1e-30, 1e-6),
+    ),
+    "P0_f": ParameterSpec(
+        "P0_f",
+        scope="global",
+        transform="log",
+        initial=1e-12,
+        bounds=(1e-30, 1e-6),
+    ),
+}
+
+
+def parameter_specs(
+    enable_vacancy_extension: bool = False,
+    coalescence_model: str = "interaction_driven",
+):
+    coalescence_model = str(coalescence_model).strip().lower()
+    if coalescence_model == "interaction_driven":
+        specs = DEFAULT_PARAMETER_SPECS
+    elif coalescence_model == "legacy_quadratic":
+        specs = tuple(
+            LEGACY_QUADRATIC_COALESCENCE_SPECS.get(spec.name, spec)
+            for spec in DEFAULT_PARAMETER_SPECS
+        )
+    else:
+        raise ValueError(
+            "Coalescence model must be 'interaction_driven' or "
+            "'legacy_quadratic'."
+        )
     if enable_vacancy_extension:
         specs += VACANCY_EXTENSION_PARAMETER_SPECS
     return specs

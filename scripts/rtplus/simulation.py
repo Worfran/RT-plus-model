@@ -62,6 +62,10 @@ def simulate_temperature(
         "Pcs": coalescence_rate(theta["P0"], theta["Ea"], T_K),
         "Pfcs": coalescence_rate(theta["P0_f"], theta["Ea_f"], T_K),
         "Puf": Puf_by_T[T_C],
+        "coalescence_model": theta.get(
+            "coalescence_model",
+            "interaction_driven",
+        ),
     }
 
     sol = solve_ivp(
@@ -232,6 +236,10 @@ def simulate_event(
             theta["P0_f"],
             theta["Ea_f"],
             T_K,
+        ),
+        "coalescence_model": theta.get(
+            "coalescence_model",
+            "interaction_driven",
         ),
     }
 

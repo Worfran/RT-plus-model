@@ -36,9 +36,12 @@ class MaterialConstants:
     Omega0: float = field(default_factory=lambda: (5.41e-8 ** 3) / 4.0)
     r0: float = field(default_factory=lambda: 2.0 * 5.41e-8)
     Rii: float = field(default_factory=lambda: (np.sqrt(3.0) / 2.0) * 5.41e-8)
-    # Interstitial-vacancy recombination bias/capture factors
-    Ziv_iK: float = 48.0
-    Ziv_vK: float = 48.0
+    # Interstitial-vacancy recombination combinatorial/capture factors from
+    # the two-sublattice rate-theory convention used in Appendix B of the
+    # loop-lifetime reference.  The present six-state model uses these as an
+    # effective, single-population approximation.
+    Ziv_iK: float = 24.0
+    Ziv_vK: float = 36.0
 
     # Ceria oxygen-vacancy diffusion prefactor, cm^2/s.  The value is the
     # 120e6 um^2/s prefactor cited in Table 4 of Bawane et al.  Vacancy
@@ -84,11 +87,18 @@ class FitConfig:
     parallel_starts: bool = False
     max_workers: Optional[int] = None
     random_seed: int = 10
+    # Select the loop-density loss law. The interaction-driven form is the
+    # coalescence model adapted from the loop-lifetime work; the legacy form
+    # is retained only for controlled comparisons.
+    coalescence_model: str = "interaction_driven"
     # These are optimizer-start multipliers, not additional fitted parameters.
     # The baseline, moderate, and strong seeds let the existing fitted initial
     # concentrations explore states with enough latent inventory to survive
     # the complete RT -> 900 C -> 1100 C sequence.
     initial_population_start_multipliers: Sequence[float] = (1.0, 3.0, 10.0)
+    # Unlike the start multipliers, this is a hard lower-bound constraint on
+    # the fitted initial concentrations relative to their nominal values.
+    initial_population_min_multiplier: float = 1.0
     maxiter: int = 2000
     ftol: float = 1e-9
     gtol: float = 1e-6
@@ -100,6 +110,10 @@ class FitConfig:
     objective_mode: str = "image_balanced_extended"
     # NB2 alpha floor.  alpha=0.04 gives a 20% asymptotic count CV.
     count_overdispersion_floor: float = 0.04
+    # Both modes constrain absolute density by default. Selecting BF alone is
+    # available as a sensitivity test for the known BF/DF count inconsistency,
+    # but it must not silently hide a poor DF density prediction.
+    absolute_count_modes: Sequence[str] = ("BF", "DF")
     # The faulted-loop family is deliberately Gaussian.  Retain the complete
     # small-loop side and trim only the largest skewed tail from the size loss.
     # Counts still use every observed loop.

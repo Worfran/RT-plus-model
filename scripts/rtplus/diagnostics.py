@@ -92,4 +92,5 @@ def print_prediction_diagnostics(predictions, theta):
         print(f"  Cp = {pred.Cp:.3e} cm^-3")
         print(f"  Di = {pred.Di:.3e} cm^2/s")
         print(f"  Puf = {pred.Puf:.3e}")
-        print(f"  Pcs = {pred.Pcs:.3e}")
+        print(f"  lambda_p(T) = {pred.Pcs:.3e} cm^4/s")
+        print(f"  lambda_f(T) = {pred.Pfcs:.3e} cm^4/s")

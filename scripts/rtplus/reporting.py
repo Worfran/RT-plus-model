@@ -67,8 +67,20 @@ def write_fit_result_tables(
             }
         )
 
+    coalescence_model = theta.get("coalescence_model", "interaction_driven")
+    coalescence_units = (
+        "cm^4/s" if coalescence_model == "interaction_driven" else "cm^3/s"
+    )
     if objective is not None:
         add_parameter("fit", "objective", "Final objective", objective, "-", "derived")
+    add_parameter(
+        "model",
+        "coalescence_model",
+        "Loop-density coalescence loss law",
+        coalescence_model,
+        "-",
+        "selected",
+    )
     add_parameter(
         "model",
         "faulted_distribution_DF",
@@ -96,9 +108,9 @@ def write_fit_result_tables(
     for parameter, meaning, value, units, status in (
         ("D0", "Interstitial diffusion prefactor", material.D0, "cm^2/s", "fixed"),
         ("Em", "Interstitial migration energy", theta["Em"], "eV", "fitted"),
-        ("P0", "Perfect-loop coalescence prefactor", theta["P0"], "cm^3/s", "fitted"),
+        ("lambda0_p", "Perfect-loop coalescence lifetime prefactor", theta["P0"], coalescence_units, "fitted"),
         ("Ea", "Perfect-loop coalescence barrier", theta["Ea"], "eV", "fitted"),
-        ("P0_f", "Faulted-loop coalescence prefactor", theta["P0_f"], "cm^3/s", "fitted"),
+        ("lambda0_f", "Faulted-loop coalescence lifetime prefactor", theta["P0_f"], coalescence_units, "fitted"),
         ("Ea_f", "Faulted-loop coalescence barrier", theta["Ea_f"], "eV", "fitted"),
         (
             "k_f_initial",
@@ -153,6 +165,19 @@ def write_fit_result_tables(
             "fitted",
         )
 
+    for event_order, prediction in sorted(predictions.items()):
+        temperature_C = float(prediction["temperature_C"])
+        Df_nm, Dp_nm = predicted_mean_diameters_nm(prediction, theta)
+        for family, diameter_nm in (("Df", Df_nm), ("Dp", Dp_nm)):
+            add_parameter(
+                "derived event",
+                f"{family}_mean_event_{event_order}",
+                f"{family} mean diameter at {temperature_C:g} C",
+                diameter_nm,
+                "nm",
+                "derived",
+            )
+
     with parameter_path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=tuple(parameter_rows[0]))
         writer.writeheader()
@@ -205,10 +230,21 @@ def write_fit_result_tables(
 
 def print_final_parameter_tables(theta, material, predictions, objective=None) -> None:
     """Print fitted, initial-condition, and derived annealing parameters."""
+    coalescence_model = theta.get("coalescence_model", "interaction_driven")
+    coalescence_units = (
+        "cm^4/s" if coalescence_model == "interaction_driven" else "cm^3/s"
+    )
     if objective is not None:
         print(f"\nFinal objective: {float(objective):.8g}")
 
     fitted_rows = [
+        (
+            "coalescence model",
+            "Loop-density coalescence loss law",
+            coalescence_model,
+            "-",
+            "selected",
+        ),
         (
             "faulted family DF",
             "DF faulted-loop observation distribution",
@@ -232,9 +268,9 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
         ),
         ("D0", "Interstitial diffusion prefactor", _format_value(material.D0), "cm^2/s", "fixed"),
         ("Em", "Interstitial migration energy", _format_value(theta["Em"]), "eV", "fitted"),
-        ("P0", "Perfect-loop coalescence prefactor", _format_value(theta["P0"]), "cm^3/s", "fitted"),
+        ("lambda0_p", "Perfect-loop coalescence lifetime prefactor", _format_value(theta["P0"]), coalescence_units, "fitted"),
         ("Ea", "Perfect-loop coalescence barrier", _format_value(theta["Ea"]), "eV", "fitted"),
-        ("P0_f", "Faulted-loop coalescence prefactor", _format_value(theta["P0_f"]), "cm^3/s", "fitted"),
+        ("lambda0_f", "Faulted-loop coalescence lifetime prefactor", _format_value(theta["P0_f"]), coalescence_units, "fitted"),
         ("Ea_f", "Faulted-loop coalescence barrier", _format_value(theta["Ea_f"]), "eV", "fitted"),
         (
             "k_f(as-irradiated)",
@@ -389,8 +425,8 @@ def print_final_parameter_tables(theta, material, predictions, objective=None) -
             "Dp mean (nm)",
             "BF faulted fraction",
             "Di (cm^2/s)",
-            "Pcs (cm^3/s)",
-            "Pfcs (cm^3/s)",
+            f"lambda_p(T) ({coalescence_units})",
+            f"lambda_f(T) ({coalescence_units})",
             "Puf (1/s)",
         ),
         event_rows,

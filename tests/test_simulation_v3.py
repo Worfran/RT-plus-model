@@ -47,6 +47,10 @@ from rtplus.parameters import (
     unpack_theta,
 )
 from rtplus.physics import (
+    COALESCENCE_LIFETIME_DENSITY_EXPONENT,
+    COALESCENCE_RADIUS_EXPONENT,
+    coalescence_inverse_lifetime,
+    coalescence_number_loss,
     compute_radius,
     lognormal_mean_radius_from_rms,
     lognormal_rms_radius_from_mean,
@@ -92,6 +96,7 @@ class SimulationV3Tests(unittest.TestCase):
             n_starts=4,
             random_seed=3,
             initial_population_start_multipliers=(1.0, 3.0, 10.0),
+            initial_population_min_multiplier=1.0,
         )
         starts, _ = make_start_vectors(
             self.temperatures,
@@ -111,8 +116,64 @@ class SimulationV3Tests(unittest.TestCase):
             self.assertAlmostEqual(moderate[name], baseline[name])
             self.assertAlmostEqual(strong[name], baseline[name])
 
+    def test_initial_population_minimum_multiplier_changes_fit_bounds(self):
+        fit_config = FitConfig(
+            n_starts=3,
+            initial_population_start_multipliers=(10.0, 30.0, 100.0),
+            initial_population_min_multiplier=10.0,
+        )
+        starts, bounds = make_start_vectors(
+            self.temperatures,
+            fit_config,
+            self.specs,
+        )
+        for start in starts:
+            theta = unpack_theta(start, self.temperatures, specs=self.specs)
+            for name in ("Ci0", "Cf0", "Cp0"):
+                self.assertGreaterEqual(
+                    theta[name] / self.theta[name],
+                    10.0 * (1.0 - 1.0e-12),
+                )
+
+        lower_bound_theta = unpack_theta(
+            np.asarray([low for low, _ in bounds]),
+            self.temperatures,
+            specs=self.specs,
+        )
+        for name in ("Ci0", "Cf0", "Cp0"):
+            self.assertAlmostEqual(
+                lower_bound_theta[name] / self.theta[name],
+                10.0,
+            )
+
     def test_default_rt_weight_is_relaxed_but_still_emphasized(self):
         self.assertAlmostEqual(FitConfig().room_temperature_loss_weight, 1.5)
+
+    def test_default_absolute_count_constraint_retains_both_modes(self):
+        self.assertEqual(
+            tuple(FitConfig().absolute_count_modes),
+            ("BF", "DF"),
+        )
+
+    def test_legacy_coalescence_uses_quadratic_density_loss(self):
+        coefficient = 2.5e-18
+        density = 3.2e16
+        loss = coalescence_number_loss(
+            coefficient,
+            1.4e-7,
+            density,
+            model="legacy_quadratic",
+        )
+        self.assertAlmostEqual(loss, coefficient * density**2)
+
+    def test_legacy_coalescence_parameter_specs_restore_old_scale(self):
+        legacy_specs = parameter_specs(
+            False,
+            coalescence_model="legacy_quadratic",
+        )
+        by_name = {spec.name: spec for spec in legacy_specs}
+        self.assertEqual(by_name["P0"].initial, 1.0e-12)
+        self.assertEqual(by_name["P0_f"].bounds, (1.0e-30, 1.0e-6))
 
     def test_upper_trimmed_size_subset_keeps_the_small_loop_tail(self):
         values = np.arange(1.0, 101.0)
@@ -740,14 +801,81 @@ class SimulationV3Tests(unittest.TestCase):
             "enable_surface_sink": False,
         }
         derivative = rhs(0.0, state, params)
+        expected_loss = coalescence_number_loss(params["Pfcs"], rf, cf)
         self.assertEqual(derivative[2], 0.0)
-        self.assertLess(derivative[4], 0.0)
-        dt = 0.1
-        evolved = state + dt * derivative
-        evolved_rf = compute_radius(
-            evolved[2], evolved[4], self.material.b, self.material.Omega0
+        self.assertAlmostEqual(derivative[4], -expected_loss)
+
+        # Differentiate R = sqrt(Omega0*N/(pi*b*C)).  At fixed inventory,
+        # dR/dt = -R/(2*C) dC/dt for conserved loop inventory.
+        radius_rate = -rf * derivative[4] / (2.0 * cf)
+        expected_radius_rate = 0.5 * rf * expected_loss / cf
+        self.assertAlmostEqual(radius_rate, expected_radius_rate)
+        self.assertGreater(radius_rate, 0.0)
+
+    def test_perfect_coalescence_increases_radius_at_fixed_content(self):
+        rp = 2.0e-7
+        cp = 4.0e16
+        state = np.array([
+            0.0,
+            0.0,
+            loop_content_from_radius(1.0e-7, 8.0e16, self.material.b, self.material.Omega0),
+            loop_content_from_radius(rp, cp, self.material.b, self.material.Omega0),
+            8.0e16,
+            cp,
+        ])
+        params = {
+            "a": self.material.a,
+            "b": self.material.b,
+            "Omega0": self.material.Omega0,
+            "r0": self.material.r0,
+            "Rii": self.material.Rii,
+            "Ziv_iK": self.material.Ziv_iK,
+            "Ziv_vK": self.material.Ziv_vK,
+            "G0i": 0.0,
+            "G0v": 0.0,
+            "Di": 0.0,
+            "Dv": 0.0,
+            "Puf": 0.0,
+            "Pcs": 3.0e-18,
+            "Pfcs": 0.0,
+            "enable_vacancy_extension": False,
+            "enable_surface_sink": False,
+        }
+        derivative = rhs(0.0, state, params)
+        expected_loss = coalescence_number_loss(params["Pcs"], rp, cp)
+        self.assertEqual(derivative[3], 0.0)
+        self.assertAlmostEqual(derivative[5], -expected_loss)
+
+        radius_rate = -rp * derivative[5] / (2.0 * cp)
+        expected_radius_rate = 0.5 * rp * expected_loss / cp
+        self.assertAlmostEqual(radius_rate, expected_radius_rate)
+        self.assertGreater(radius_rate, 0.0)
+
+    def test_coalescence_loss_rejects_nonphysical_inputs(self):
+        with self.assertRaises(ValueError):
+            coalescence_number_loss(-1.0e-18, 1.0e-7, 1.0e16)
+        with self.assertRaises(ValueError):
+            coalescence_number_loss(1.0e-18, -1.0e-7, 1.0e16)
+        with self.assertRaises(ValueError):
+            coalescence_number_loss(1.0e-18, 1.0e-7, -1.0e16)
+
+    def test_interaction_driven_coalescence_matches_publication_exponents(self):
+        coefficient = 2.5e-22
+        radius = 1.4e-7
+        density = 3.2e16
+        expected_inverse_lifetime = (
+            coefficient
+            * radius**COALESCENCE_RADIUS_EXPONENT
+            * density**COALESCENCE_LIFETIME_DENSITY_EXPONENT
         )
-        self.assertGreater(evolved_rf, rf)
+        inverse_lifetime = coalescence_inverse_lifetime(
+            coefficient,
+            radius,
+            density,
+        )
+        loss = coalescence_number_loss(coefficient, radius, density)
+        self.assertAlmostEqual(inverse_lifetime, expected_inverse_lifetime)
+        self.assertAlmostEqual(loss, expected_inverse_lifetime * density)
 
     def test_corrected_rt_df_dataset_is_loaded(self):
         data = load_all_loop_data(DataConfig(data_dir=ROOT / "Data"), ROOT)

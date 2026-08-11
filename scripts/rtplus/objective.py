@@ -190,6 +190,7 @@ def total_objective(
         "DF": fit_config.faulted_distribution_df,
         "BF": fit_config.faulted_distribution_bf,
     }
+    theta["coalescence_model"] = fit_config.coalescence_model
     if fit_config.apply_smooth_visibility:
         theta.update(
             {
@@ -304,14 +305,20 @@ def total_objective(
                     return PENALTY
                 image_losses.append(-float(np.mean(logpdf)))
 
-            try:
-                count_loss, _ = image_count_deviance(
-                    group,
-                    predicted_densities,
-                    fit_config.count_overdispersion_floor,
-                )
-            except ValueError:
-                return PENALTY
+            absolute_count_modes = {
+                str(value).strip().upper()
+                for value in fit_config.absolute_count_modes
+            }
+            count_loss = 0.0
+            if str(mode).strip().upper() in absolute_count_modes:
+                try:
+                    count_loss, _ = image_count_deviance(
+                        group,
+                        predicted_densities,
+                        fit_config.count_overdispersion_floor,
+                    )
+                except ValueError:
+                    return PENALTY
 
             dataset_loss = float(np.mean(image_losses)) + count_loss
             if not np.isfinite(dataset_loss):
